@@ -1,0 +1,206 @@
+package tests;
+
+use ecosystem::tracing;
+use std::context;
+use std::task;
+use std::testing;
+
+#[test]
+fn logger_groups_attrs_and_event_fields_in_call_order() -> () {
+    let memory = tracing::MemorySink::new();
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(scope, memory.sink(), tracing::Options::standard()),
+                "tracer",
+            );
+            let logger = testing::expect_ok(
+                tracing::Logger::standard(tracer, "service::api"),
+                "logger",
+            );
+            let logger = testing::expect_ok(
+                logger.with_attrs(
+                    tracing::Fields::new().with("service", tracing::Value::Text("catalog")),
+                ),
+                "base attrs",
+            );
+            let logger = testing::expect_ok(logger.with_group("request"), "request group");
+            let logger = testing::expect_ok(
+                logger.with_attrs(tracing::Fields::new().with("id", tracing::Value::Int(7))),
+                "grouped attrs",
+            );
+            let logger = testing::expect_ok(logger.with_group("db"), "nested group");
+            testing::assert(
+                testing::expect_ok(
+                    logger.enabled(context::Context::background(), tracing::Level::Info, "query"),
+                    "enabled",
+                ),
+            );
+            testing::assert_eq(
+                testing::expect_ok(
+                    logger.log(
+                        context::Context::background(),
+                        tracing::Level::Info,
+                        "query",
+                        tracing::Fields::new().with("rows", tracing::Value::Uint(3)),
+                    ),
+                    "log",
+                ),
+                tracing::Delivery::Accepted,
+            );
+            testing::assert_ok(tracer.close(context::Context::background()));
+        },
+    );
+    let records = memory.records();
+    testing::assert_eq(records.len(), 1);
+    testing::assert_eq(records[0].metadata.name, "query");
+    testing::assert_eq(records[0].metadata.target, "service::api");
+    testing::assert_eq(
+        records[0].fields.get("service").unwrap_or(tracing::Value::Null),
+        tracing::Value::Text("catalog"),
+    );
+    testing::assert_eq(
+        records[0].fields.get("request.id").unwrap_or(tracing::Value::Null),
+        tracing::Value::Int(7),
+    );
+    testing::assert_eq(
+        records[0].fields.get("request.db.rows").unwrap_or(tracing::Value::Null),
+        tracing::Value::Uint(3),
+    );
+}
+
+#[test]
+fn sink_attrs_groups_and_filters_compose_on_existing_records() -> () {
+    let memory = tracing::MemorySink::new();
+    task::scope(
+        |scope| {
+            let sink = testing::expect_ok(
+                memory.sink().with_attrs(
+                    tracing::Fields::new().with("outer", tracing::Value::Int(1)),
+                ),
+                "attrs",
+            );
+            let sink = testing::expect_ok(sink.with_group("request"), "group");
+            let sink = testing::expect_ok(
+                sink.with_attrs(tracing::Fields::new().with("inner", tracing::Value::Int(2))),
+                "inner attrs",
+            ).filtered(tracing::Filter::new(Option::Some(tracing::Level::Warn)));
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(
+                    scope,
+                    sink,
+                    tracing::Options {
+                        filter: tracing::Filter::new(Option::Some(tracing::Level::Trace)),
+                        ..tracing::Options::standard(),
+                    },
+                ),
+                "tracer",
+            );
+            for level in Vec::from_array([tracing::Level::Info, tracing::Level::Error]) {
+                testing::assert_ok(
+                    tracer.event(
+                        context::Context::background(),
+                        Option::None,
+                        tracing::Metadata::new(level, "app", "event"),
+                        tracing::Fields::new().with("value", tracing::Value::Bool(true)),
+                    ),
+                );
+            }
+            testing::assert_ok(tracer.close(context::Context::background()));
+        },
+    );
+    let records = memory.records();
+    testing::assert_eq(records.len(), 1);
+    testing::assert_eq(records[0].metadata.level, tracing::Level::Error);
+    testing::assert_eq(records[0].fields.len(), 3);
+    testing::assert_eq(
+        records[0].fields.get("outer").unwrap_or(tracing::Value::Null),
+        tracing::Value::Int(1),
+    );
+    testing::assert_eq(
+        records[0].fields.get("request.inner").unwrap_or(tracing::Value::Null),
+        tracing::Value::Int(2),
+    );
+    testing::assert_eq(
+        records[0].fields.get("request.value").unwrap_or(tracing::Value::Null),
+        tracing::Value::Bool(true),
+    );
+}
+
+#[test]
+fn logging_limits_fail_recoverably() -> () {
+    let limits = tracing::LogLimits {
+        max_fields: 2,
+        max_key_bytes: 8,
+        max_message_bytes: 3,
+        max_value_bytes: 4,
+        max_group_depth: 1,
+    };
+    testing::assert_err(
+        tracing::Fields::new().with("longfield", tracing::Value::Null).grouped_checked("g", limits),
+    );
+    let sink = testing::expect_ok(
+        tracing::MemorySink::new().sink().with_group_checked("g", limits),
+        "first group",
+    );
+    testing::assert_err(sink.with_group_checked("h", limits));
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(
+                    scope,
+                    tracing::MemorySink::new().sink(),
+                    tracing::Options::standard(),
+                ),
+                "tracer",
+            );
+            let logger = testing::expect_ok(tracing::Logger::new(tracer, "app", limits), "logger");
+            testing::assert_err(logger.with_group("longfield"));
+            testing::assert_err(
+                logger.with_attrs(tracing::Fields::new().with("x", tracing::Value::Text("longer"))),
+            );
+            testing::assert_err(
+                logger.log(
+                    context::Context::background(),
+                    tracing::Level::Info,
+                    "long",
+                    tracing::Fields::new(),
+                ),
+            );
+            testing::assert_ok(tracer.close(context::Context::background()));
+        },
+    );
+}
+
+#[test]
+fn handler_limit_errors_are_reported_at_flush() -> () {
+    let limits = tracing::LogLimits { max_fields: 1, ..tracing::LogLimits::new() };
+    let memory = tracing::MemorySink::new();
+    task::scope(
+        |scope| {
+            let sink = testing::expect_ok(
+                memory.sink().with_attrs_checked(
+                    tracing::Fields::new().with("bound", tracing::Value::Int(1)),
+                    limits,
+                ),
+                "bounded sink",
+            );
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(scope, sink, tracing::Options::standard()),
+                "tracer",
+            );
+            testing::assert_ok(
+                tracer.event(
+                    context::Context::background(),
+                    Option::None,
+                    tracing::Metadata::new(tracing::Level::Info, "app", "too_many"),
+                    tracing::Fields::new().with("event", tracing::Value::Int(2)),
+                ),
+            );
+            let failure = testing::expect_err(tracer.flush(context::Context::background()), "limit");
+            testing::assert_eq(failure.kind, tracing::ErrorKind::InvalidInput);
+            testing::assert_err(tracer.close(context::Context::background()));
+        },
+    );
+    testing::assert_eq(memory.records().len(), 0);
+}

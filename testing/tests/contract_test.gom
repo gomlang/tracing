@@ -1,0 +1,44 @@
+package tests;
+
+use ecosystem::tracing;
+use ecosystem::tracing::testing as contract;
+use std::testing;
+
+#[test]
+fn handler_contract_accepts_grouped_attr_wrappers() -> () {
+    let report = testing::expect_ok(
+        contract::check_forwarding(
+            |sink| testing::expect_ok(
+                testing::expect_ok(
+                    sink.with_attrs(tracing::Fields::new().with("host", tracing::Value::Text("a"))),
+                    "attrs",
+                ).with_group("request"),
+                "group",
+            ),
+        ),
+        "handler contract",
+    );
+    testing::assert_eq(report.records.len(), 3);
+    testing::assert_eq(report.flushes, 2);
+    testing::assert_eq(report.finishes, 1);
+    testing::assert_eq(
+        report.records[0].fields.get("host").unwrap_or(tracing::Value::Null),
+        tracing::Value::Text("a"),
+    );
+    testing::assert_eq(
+        report.records[1].fields.get("request.value").unwrap_or(tracing::Value::Null),
+        tracing::Value::Text("two"),
+    );
+}
+
+#[test]
+fn handler_contract_accepts_metadata_filtering() -> () {
+    let report = testing::expect_ok(
+        contract::check_handler(
+            |sink| sink.filtered(tracing::Filter::new(Option::Some(tracing::Level::Warn))),
+        ),
+        "filtered handler contract",
+    );
+    testing::assert_eq(report.records.len(), 1);
+    testing::assert_eq(report.records[0].metadata.name, "third");
+}
