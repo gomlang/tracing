@@ -11,6 +11,7 @@ A structured tracing library implemented in GoML, with no Go adapter. It provide
 - Level and namespace target filters, longest matching namespace precedence, last directive wins on equal targets, and atomic filter reload.
 - Deterministic all/none/every-N root sampling. Root spans and standalone events each consume one sampling ordinal, including filtered roots. Child spans and their events inherit the root decision and never consume an ordinal.
 - Callback subscribers, fanout, subscriber-local filters, synchronized in-memory collection, and generic `std::io::Write` text/JSON sinks.
+- Checked structured logging with persistent logger attributes, dotted field groups, sink attribute/group wrappers, and a reusable handler contract probe in `ecosystem::tracing::testing`.
 - Bounded queue, blocking or drop-newest event publication, dropped/accepted/filtered/live-span metrics, cancellation and deadlines while acquiring admission, queueing, flushing, and waiting for close.
 - Ordered flush barriers, coordinated concurrent close, first-error latching, and exactly one sink finish callback. `Span.in_scope` and `Tracer.in_scope` preserve both an action error and cleanup errors through `std::resource::ScopeError`.
 
@@ -50,6 +51,16 @@ fn main() -> () {
 ```
 
 The independent `ecosystem/consumers/tracing` module is a versioned consumer that simulates request handlers with concurrently traced lookup tasks. It exercises exported contexts, callbacks, immutable fields, generic scoped results, hidden spans, and parent closure before child completion. `--json` reads an array of scenarios from stdin and emits records plus metrics for each scenario.
+
+## Structured logging and handler contracts
+
+`Logger::standard(tracer, target)` creates a logging handle over an existing tracer. `with_attrs(fields)` returns a new handle with immutable bound attributes; `with_group(name)` groups later attributes and event fields. `log(ctx, level, message, fields)` emits a tracing event, and `log_in` attaches an existing `TraceContext`. The message is the event's metadata name. `enabled` delegates to the tracer's advisory filter query. Existing sampling, queue admission, flush, and close contracts still apply.
+
+`Fields::grouped(name)` prefixes keys with `name.`. Handler wrappers `Sink::with_attrs(fields)` and `Sink::with_group(name)` compose with existing `filtered` and `fanout`. Wrapper order determines scope: attributes bound before a group remain outside that group, while later attributes and event fields receive its prefix. Duplicate fully qualified names use the existing last-value-wins `Fields` rule. Groups are flattened into dotted field names in text and JSON output; they are not nested JSON objects. This also means an explicit dotted key can collide with a grouped key.
+
+`LogLimits::new()` caps fields at 128, key bytes at 256, message bytes at 4096, text value bytes at 16384, and group depth at eight. `Logger::new`, `Fields::grouped_checked`, and the checked sink wrappers accept explicit limits. Invalid names, overlong values, too many fields, and excessive group depth return `ErrorKind::InvalidInput`. Sink wrappers validate transformed records when the worker calls them; an error follows the existing first-error latching contract and is reported by `flush` or `close`. Ordinary `Fields::with` and direct `Tracer::event` retain their existing behavior and do not acquire these logging limits.
+
+`ecosystem::tracing::testing::check_handler(factory)` runs three typed events through a caller-supplied `Sink -> Sink` wrapper and a probe sink. It verifies ordered event records, a flush barrier, close flush, and exactly one finish call, then returns the captured records for wrapper-specific assertions. A wrapper may intentionally filter records. `check_forwarding` additionally requires all three events and their metadata to be preserved. The contract probes use the public tracer lifecycle and are reusable by downstream handler implementations; they do not send messages or require a host logging adapter.
 
 ## Filtering and ancestry
 

@@ -1,0 +1,214 @@
+package tracing;
+
+use std::context;
+
+pub struct LogLimits {
+    pub max_fields: isize,
+    pub max_key_bytes: isize,
+    pub max_message_bytes: isize,
+    pub max_value_bytes: isize,
+    pub max_group_depth: isize,
+}
+
+impl LogLimits {
+    pub fn new() -> LogLimits {
+        LogLimits {
+            max_fields: 128,
+            max_key_bytes: 256,
+            max_message_bytes: 4096,
+            max_value_bytes: 16384,
+            max_group_depth: 8,
+        }
+    }
+
+    pub fn validate(self: LogLimits) -> Result[(), Error] {
+        if self.max_fields < 0 || self.max_fields > 1000000 || self.max_key_bytes < 1
+            || self.max_key_bytes > 1048576
+            || self.max_message_bytes < 0
+            || self.max_message_bytes > 1048576
+            || self.max_value_bytes < 0
+            || self.max_value_bytes > 1048576
+            || self.max_group_depth < 0
+            || self.max_group_depth > 256 {
+            return Result::Err(log_error("invalid structured logging limits"))
+        }
+        Result::Ok(())
+    }
+}
+
+fn log_error(message: string) -> Error {
+    Error { kind: ErrorKind::InvalidInput, message }
+}
+
+fn valid_key(value: string, limits: LogLimits) -> bool {
+    value != "" && value.byte_len() <= limits.max_key_bytes
+}
+
+fn check_fields(fields: Fields, limits: LogLimits) -> Result[(), Error] {
+    if fields.len() > limits.max_fields {
+        return Result::Err(log_error("structured field limit exceeded"))
+    }
+    for field in fields.to_vec() {
+        if !valid_key(field.name, limits) {
+            return Result::Err(log_error("invalid structured field name"))
+        }
+        if let Value::Text(value) = field.value {
+            if value.byte_len() > limits.max_value_bytes {
+                return Result::Err(log_error("structured value byte limit exceeded"))
+            }
+        }
+    }
+    Result::Ok(())
+}
+
+impl Fields {
+    pub fn grouped_checked(self: Fields, name: string, limits: LogLimits) -> Result[Fields, Error] {
+        limits.validate()?;
+        if !valid_key(name, limits) {
+            return Result::Err(log_error("invalid structured group name"))
+        }
+        check_fields(self, limits)?;
+        let mut result = Fields::new();
+        for field in self.to_vec() {
+            let key = name + "." + field.name;
+            if !valid_key(key, limits) {
+                return Result::Err(log_error("structured field name exceeds byte limit"))
+            }
+            result = result.with(key, field.value);
+        }
+        Result::Ok(result)
+    }
+
+    pub fn grouped(self: Fields, name: string) -> Result[Fields, Error] {
+        self.grouped_checked(name, LogLimits::new())
+    }
+}
+
+impl Sink {
+    pub fn with_attrs_checked(self: Sink, attrs: Fields, limits: LogLimits) -> Result[Sink, Error] {
+        limits.validate()?;
+        check_fields(attrs, limits)?;
+        Result::Ok(
+            Sink {
+                group_depth: self.group_depth,
+                write: |record| {
+                    let combined = attrs.merge(record.fields);
+                    check_fields(combined, limits)?;
+                    (self.write)(Record { fields: combined, ..record })
+                },
+                flush: self.flush,
+                finish: self.finish,
+            },
+        )
+    }
+
+    pub fn with_attrs(self: Sink, attrs: Fields) -> Result[Sink, Error] {
+        self.with_attrs_checked(attrs, LogLimits::new())
+    }
+
+    pub fn with_group_checked(self: Sink, name: string, limits: LogLimits) -> Result[Sink, Error] {
+        limits.validate()?;
+        if !valid_key(name, limits) || self.group_depth >= limits.max_group_depth {
+            return Result::Err(log_error("invalid structured group name"))
+        }
+        Result::Ok(
+            Sink {
+                group_depth: self.group_depth + 1,
+                write: |record| {
+                    let fields = record.fields.grouped_checked(name, limits)?;
+                    (self.write)(Record { fields, ..record })
+                },
+                flush: self.flush,
+                finish: self.finish,
+            },
+        )
+    }
+
+    pub fn with_group(self: Sink, name: string) -> Result[Sink, Error] {
+        self.with_group_checked(name, LogLimits::new())
+    }
+}
+
+pub struct Logger {
+    tracer: Tracer,
+    target: string,
+    attrs: Fields,
+    groups: FrozenVec[string],
+    limits: LogLimits,
+}
+
+impl Logger {
+    pub fn new(tracer: Tracer, target: string, limits: LogLimits) -> Result[Logger, Error] {
+        limits.validate()?;
+        if !valid_key(target, limits) {
+            return Result::Err(log_error("invalid structured log target"))
+        }
+        Result::Ok(
+            Logger { tracer, target, attrs: Fields::new(), groups: Vec::new().freeze(), limits },
+        )
+    }
+
+    pub fn standard(tracer: Tracer, target: string) -> Result[Logger, Error] {
+        Logger::new(tracer, target, LogLimits::new())
+    }
+
+    fn grouped(self: Logger, fields: Fields) -> Result[Fields, Error] {
+        let mut value = fields;
+        let mut index = self.groups.len();
+        while index > 0 {
+            index -= 1;
+            value = value.grouped_checked(self.groups.get(index), self.limits)?;
+        }
+        Result::Ok(value)
+    }
+
+    pub fn with_group(self: Logger, name: string) -> Result[Logger, Error] {
+        if !valid_key(name, self.limits) || self.groups.len() >= self.limits.max_group_depth {
+            return Result::Err(log_error("invalid structured log group"))
+        }
+        let groups = self.groups.to_vec();
+        groups.push(name);
+        Result::Ok(Logger { groups: groups.freeze(), ..self })
+    }
+
+    pub fn with_attrs(self: Logger, attrs: Fields) -> Result[Logger, Error] {
+        check_fields(attrs, self.limits)?;
+        let merged = self.attrs.merge(self.grouped(attrs)?);
+        check_fields(merged, self.limits)?;
+        Result::Ok(Logger { attrs: merged, ..self })
+    }
+
+    pub fn enabled(self: Logger, ctx: context::Context, level: Level, message: string) -> Result[
+        bool,
+        Error,
+    ] {
+        if message.byte_len() > self.limits.max_message_bytes {
+            return Result::Err(log_error("structured log message byte limit exceeded"))
+        }
+        self.tracer.enabled(ctx, Metadata::new(level, self.target, message))
+    }
+
+    pub fn log_in(
+        self: Logger,
+        ctx: context::Context,
+        parent: Option[TraceContext],
+        level: Level,
+        message: string,
+        fields: Fields,
+    ) -> Result[Delivery, Error] {
+        if message.byte_len() > self.limits.max_message_bytes {
+            return Result::Err(log_error("structured log message byte limit exceeded"))
+        }
+        check_fields(fields, self.limits)?;
+        let merged = self.attrs.merge(self.grouped(fields)?);
+        check_fields(merged, self.limits)?;
+        self.tracer.event(ctx, parent, Metadata::new(level, self.target, message), merged)
+    }
+
+    pub fn log(self: Logger, ctx: context::Context, level: Level, message: string, fields: Fields) -> Result[
+        Delivery,
+        Error,
+    ] {
+        self.log_in(ctx, Option::None, level, message, fields)
+    }
+}

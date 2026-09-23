@@ -1,0 +1,97 @@
+package testing;
+
+use ecosystem::tracing;
+use std::context;
+use std::task;
+
+pub struct Report {
+    pub records: Vec[tracing::Record],
+    pub flushes: isize,
+    pub finishes: isize,
+}
+
+pub fn check_handler(factory: (tracing::Sink) -> tracing::Sink) -> Result[Report, string] {
+    let stored: Channel[Vec[tracing::Record]] = Channel::new(1);
+    stored.send(Vec::new());
+    let flushes = Ref::new(0);
+    let finishes = Ref::new(0);
+    let probe = tracing::Sink::new(
+        |record| {
+            let records = stored.recv().unwrap_or(Vec::new());
+            records.push(record);
+            stored.send(records);
+            Result::Ok(())
+        },
+        || {
+            flushes.set(flushes.get() + 1);
+            Result::Ok(())
+        },
+        || {
+            finishes.set(finishes.get() + 1);
+            Result::Ok(())
+        },
+    );
+    task::scope(
+        |scope| {
+            let ctx = context::Context::background();
+            let tracer = tracing::Tracer::new(
+                scope,
+                factory(probe),
+                tracing::Options {
+                    filter: tracing::Filter::new(Option::Some(tracing::Level::Trace)),
+                    ..tracing::Options::standard(),
+                },
+            ).map_err(|error| error.to_string())?;
+            let cases = Vec::from_array(
+                [
+                    (tracing::Level::Info, "first", tracing::Value::Int(1)),
+                    (tracing::Level::Debug, "second", tracing::Value::Text("two")),
+                    (tracing::Level::Error, "third", tracing::Value::Bool(true)),
+                ],
+            );
+            for (level, name, value) in cases {
+                tracer.event(
+                    ctx,
+                    Option::None,
+                    tracing::Metadata::new(level, "contract::handler", name),
+                    tracing::Fields::new().with("value", value),
+                ).map_err(|error| error.to_string())?;
+            }
+            let flushed = tracer.flush(ctx).map_err(|error| error.to_string());
+            let closed = tracer.close(ctx).map_err(|error| error.to_string());
+            flushed?;
+            closed?;
+            if flushes.get() != 2 || finishes.get() != 1 {
+                return Result::Err("handler must flush at barrier and close, then finish once")
+            }
+            let records = stored.recv().unwrap_or(Vec::new());
+            let mut previous = 0.to_u64();
+            for record in records {
+                if record.kind != tracing::Kind::Event || record.sequence <= previous {
+                    return Result::Err("handler changed record kind or sequence order")
+                }
+                previous = record.sequence;
+            }
+            Result::Ok(Report { records, flushes: flushes.get(), finishes: finishes.get() })
+        },
+    )
+}
+
+pub fn check_forwarding(factory: (tracing::Sink) -> tracing::Sink) -> Result[Report, string] {
+    let report = check_handler(factory)?;
+    if report.records.len() != 3 {
+        return Result::Err("forwarding handler must retain all three events")
+    }
+    let names = Vec::from_array(["first", "second", "third"]);
+    let levels = Vec::from_array(
+        [tracing::Level::Info, tracing::Level::Debug, tracing::Level::Error],
+    );
+    for index in 0..3 {
+        let record = report.records[index];
+        if record.metadata.name != names[index] || record.metadata.level != levels[index]
+            || record.metadata.target != "contract::handler" {
+            return Result::Err("forwarding handler changed event metadata")
+        }
+    }
+    Result::Ok(report)
+}

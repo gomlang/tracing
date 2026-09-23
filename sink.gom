@@ -8,6 +8,7 @@ pub struct Sink {
     write: (Record) -> Result[(), Error],
     flush: () -> Result[(), Error],
     finish: () -> Result[(), Error],
+    group_depth: isize,
 }
 
 impl Sink {
@@ -16,7 +17,7 @@ impl Sink {
         flush: () -> Result[(), Error],
         finish: () -> Result[(), Error],
     ) -> Sink {
-        Sink { write, flush, finish }
+        Sink { write, flush, finish, group_depth: 0 }
     }
 
     pub fn from_callback(write: (Record) -> Result[(), Error]) -> Sink {
@@ -72,15 +73,16 @@ impl Sink {
     }
 
     pub fn filtered(self: Sink, filter: Filter) -> Sink {
-        Sink::new(
-            |record| if filter.enabled(record.metadata) {
+        Sink {
+            group_depth: self.group_depth,
+            write: |record| if filter.enabled(record.metadata) {
                 (self.write)(record)
             } else {
                 Result::Ok(())
             },
-            self.flush,
-            self.finish,
-        )
+            flush: self.flush,
+            finish: self.finish,
+        }
     }
 
     pub fn writer[W: Write](writer: W, format: Format) -> Sink {
