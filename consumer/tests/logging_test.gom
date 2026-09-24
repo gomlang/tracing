@@ -1,0 +1,50 @@
+package tests;
+
+use ecosystem::tracing;
+use ecosystem::tracing::testing as contract;
+use std::context;
+use std::task;
+use std::testing;
+
+#[test]
+fn independent_logger_and_handler_contract() -> () {
+    let report = testing::expect_ok(
+        contract::check_forwarding(
+            |sink| testing::expect_ok(
+                sink.with_attrs(tracing::Fields::new().with("consumer", tracing::Value::Bool(true))),
+                "handler attrs",
+            ),
+        ),
+        "contract",
+    );
+    testing::assert_eq(report.records.len(), 3);
+    testing::assert_eq(
+        report.records[0].fields.get("consumer").unwrap_or(tracing::Value::Null),
+        tracing::Value::Bool(true),
+    );
+    let memory = tracing::MemorySink::new();
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(scope, memory.sink(), tracing::Options::standard()),
+                "tracer",
+            );
+            let logger = testing::expect_ok(tracing::Logger::standard(tracer, "consumer"), "logger");
+            let logger = testing::expect_ok(logger.with_group("job"), "group");
+            testing::assert_ok(
+                logger.log(
+                    context::Context::background(),
+                    tracing::Level::Info,
+                    "finished",
+                    tracing::Fields::new().with("count", tracing::Value::Int(2)),
+                ),
+            );
+            testing::assert_ok(tracer.close(context::Context::background()));
+        },
+    );
+    testing::assert_eq(memory.records().len(), 1);
+    testing::assert_eq(
+        memory.records()[0].fields.get("job.count").unwrap_or(tracing::Value::Null),
+        tracing::Value::Int(2),
+    );
+}
