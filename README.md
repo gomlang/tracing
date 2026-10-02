@@ -17,7 +17,7 @@ A structured tracing library implemented in GoML, with no Go adapter. It provide
 
 ## Example
 
-```gom
+```goml
 use ecosystem::tracing;
 use std::context;
 use std::io;
@@ -104,7 +104,7 @@ Future work includes W3C trace propagation, OpenTelemetry exporters, richer samp
 
 ## Development and examples
 
-Requires GoML 0.1.55 or newer. The `examples/basic/` example shares the root manifest; test-only helpers are declared in `[dev-dependencies]`. From the library root, run:
+Requires GoML 0.1.56 or newer. The `examples/basic/` example shares the root manifest; test-only helpers are declared in `[dev-dependencies]`. From the library root, run:
 
 ```sh
 goml run --example basic
