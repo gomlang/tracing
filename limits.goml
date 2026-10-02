@@ -1,0 +1,61 @@
+package tracing;
+
+pub struct RecordLimits {
+    pub max_fields: isize,
+    pub max_text_bytes: isize,
+}
+
+impl RecordLimits {
+    pub fn standard() -> RecordLimits {
+        RecordLimits { max_fields: 128, max_text_bytes: 65536 }
+    }
+
+    pub fn validate(self: RecordLimits) -> Result[(), Error] {
+        if self.max_fields < 0 || self.max_fields > 1000000 || self.max_text_bytes < 0
+            || self.max_text_bytes > 67108864 {
+            return Result::Err(
+                Error { kind: ErrorKind::InvalidInput, message: "invalid tracing record limits" },
+            )
+        }
+        Result::Ok(())
+    }
+}
+
+fn charge_record_text(value: string, remaining: Ref[isize]) -> Result[(), Error] {
+    if value.byte_len() > remaining.get() {
+        return Result::Err(
+            Error {
+                kind: ErrorKind::InvalidInput,
+                message: "tracing record text byte limit exceeded",
+            },
+        )
+    }
+    remaining.set(remaining.get() - value.byte_len());
+    Result::Ok(())
+}
+
+impl Tracer {
+    fn check_payload(self: Tracer, metadata: Metadata, fields: Fields) -> Result[(), Error] {
+        let Some(limits) = self.record_limits else {
+            return Result::Ok(());
+        };
+        if fields.len() > limits.max_fields {
+            return Result::Err(
+                Error {
+                    kind: ErrorKind::InvalidInput,
+                    message: "tracing record field limit exceeded",
+                },
+            )
+        }
+        let remaining = Ref::new(limits.max_text_bytes);
+        charge_record_text(metadata.target, remaining)?;
+        charge_record_text(metadata.name, remaining)?;
+        for field in fields.values.iter() {
+            charge_record_text(field.name, remaining)?;
+            if let Value::Text(value) = field.value {
+                charge_record_text(value, remaining)?;
+            }
+        }
+        Result::Ok(())
+    }
+}

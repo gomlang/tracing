@@ -26,6 +26,7 @@ pub struct Tracer {
     done: Channel[()],
     failure: Channel[Option[Error]],
     overflow: Overflow,
+    record_limits: Option[RecordLimits],
 }
 
 fn context_error(error: context::Error) -> Error {
@@ -48,6 +49,21 @@ fn closed() -> Error {
 
 impl Tracer {
     pub fn new(scope: task::Scope, sink: Sink, options: Options) -> Result[Tracer, Error] {
+        Tracer::create(scope, sink, options, Option::None)
+    }
+
+    pub fn new_with_limits(scope: task::Scope, sink: Sink, options: Options, limits: RecordLimits) -> Result[
+        Tracer,
+        Error,
+    ] {
+        limits.validate()?;
+        Tracer::create(scope, sink, options, Option::Some(limits))
+    }
+
+    fn create(scope: task::Scope, sink: Sink, options: Options, record_limits: Option[RecordLimits]) -> Result[
+        Tracer,
+        Error,
+    ] {
         if scope.token().is_cancelled() {
             return Result::Err(
                 Error { kind: ErrorKind::Cancelled, message: "worker scope already cancelled" },
@@ -92,6 +108,7 @@ impl Tracer {
             done: Channel::new(0),
             failure,
             overflow: options.overflow,
+            record_limits,
         };
         if scope.try_spawn(|token| worker(tracer, sink, token)).is_none() {
             return Result::Err(
@@ -169,6 +186,7 @@ impl Tracer {
         Delivery,
         Error,
     ] {
+        self.check_payload(record.metadata, record.fields)?;
         let mut state = self.state.get();
         if state.next_sequence == 18446744073709551615 {
             return Result::Err(

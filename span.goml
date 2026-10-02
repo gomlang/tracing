@@ -96,6 +96,7 @@ impl Tracer {
         if let Some(parent) = parent {
             self.validate_parent(parent)?;
         }
+        self.check_payload(metadata, fields)?;
         let id = self.allocate_id()?;
         let state = self.state.get();
         let root_sampled = match parent {
@@ -211,7 +212,9 @@ impl Span {
         if state.closed {
             return Result::Err(closed())
         }
+        self.tracer.check_payload(self.metadata, fields)?;
         let fields = state.fields.merge(fields);
+        self.tracer.check_payload(self.metadata, fields)?;
         let delivery = if self.recorded {
             self.tracer.publish(ctx, self.make_record(Kind::SpanUpdate, fields), false)?
         } else {

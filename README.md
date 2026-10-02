@@ -122,3 +122,31 @@ capacity available to future writes. Drain before overflow when continuing a
 trace: draining cannot clear a latched tracer failure. Both `records()` and
 `drain()` synchronize with writes and may be used concurrently. A record limit
 does not bound field bytes or snapshots retained by the caller.
+
+## Publication payload limits
+
+`Tracer::new_with_limits(scope, sink, options, RecordLimits)` optionally bounds
+payloads before queue admission. `RecordLimits::standard()` allows 128 fields
+and 64 KiB of text per record. Configurable limits allow zero through 1,000,000
+fields and zero through 64 MiB of text. Existing `Tracer::new` and `Options`
+retain their original behavior and shape.
+
+Text accounting sums UTF-8 bytes of metadata target/name, every field name and
+every `Value::Text`; numbers, booleans and null have fixed-size storage bounded
+by the field count. It measures logical payload text, not escaped JSON length,
+allocator overhead, larger backing buffers retained by string slices, or
+caller-owned construction buffers. Queue capacity times
+the per-record bounds limits queued payloads, with one additional record in the
+sink callback. It is not a dynamically shared aggregate byte budget.
+
+Span starts and complete merged update snapshots are validated, including hidden
+and unsampled spans because their handles retain fields. Incoming update fields
+are checked before merging. An invalid update leaves the previous snapshot
+unchanged, so closing the span can still emit its valid end record. Events
+suppressed by sampling/filtering bypass payload validation and are counted as
+filtered; admitted events validate their complete supplied fields, including any
+attributes merged by `Logger`. Parent span fields are not implicitly copied to
+events. Byte/field rejection returns `InvalidInput`, consumes no queue slot or
+record sequence, and does not latch a sink failure or change accepted/dropped
+counts. Caller-retained spans and sink-retained records need their own overall
+retention policy.
