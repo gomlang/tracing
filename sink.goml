@@ -110,13 +110,32 @@ pub enum Format {
 
 pub struct MemorySink {
     state: Channel[Vec[Record]],
+    capacity: Option[isize],
 }
 
 impl MemorySink {
     pub fn new() -> MemorySink {
         let state = Channel::new(1);
         state.send(Vec::new());
-        MemorySink { state }
+        MemorySink { state, capacity: Option::None }
+    }
+
+    pub fn bounded(capacity: isize) -> Result[MemorySink, Error] {
+        if capacity < 1 || capacity > 1000000 {
+            return Result::Err(
+                Error {
+                    kind: ErrorKind::InvalidInput,
+                    message: "memory sink capacity must be 1 through 1000000",
+                },
+            )
+        }
+        Result::Ok(MemorySink { capacity: Option::Some(capacity), ..MemorySink::new() })
+    }
+
+    pub fn drain(self: MemorySink) -> Vec[Record] {
+        let values = self.state.recv().unwrap_or(Vec::new());
+        self.state.send(Vec::new());
+        values
     }
 
     pub fn records(self: MemorySink) -> Vec[Record] {
@@ -130,6 +149,12 @@ impl MemorySink {
         Sink::from_callback(
             |record| {
                 let values = self.state.recv().unwrap_or(Vec::new());
+                if let Some(capacity) = self.capacity {
+                    if values.len() >= capacity {
+                        self.state.send(values);
+                        return Result::Err(Error::sink("memory sink capacity exceeded"))
+                    }
+                }
                 values.push(record);
                 self.state.send(values);
                 Result::Ok(())

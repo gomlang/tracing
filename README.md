@@ -113,3 +113,12 @@ goml verify --timeout 300s
 ```
 
 `goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test tracing)` also retains the library-specific smoke and compatibility checks.
+
+`MemorySink::bounded(capacity)` retains at most 1–1,000,000 records and returns
+a sink error on overflow, which the tracer latches using its normal failure
+policy. `MemorySink::new()` retains its unbounded behavior. `drain()` atomically
+removes and returns all retained records without copying, making the emptied
+capacity available to future writes. Drain before overflow when continuing a
+trace: draining cannot clear a latched tracer failure. Both `records()` and
+`drain()` synchronize with writes and may be used concurrently. A record limit
+does not bound field bytes or snapshots retained by the caller.
