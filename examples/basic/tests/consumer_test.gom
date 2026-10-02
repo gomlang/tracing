@@ -1,6 +1,6 @@
 package tests;
 
-use consumer::tracing as application;
+use ecosystem::tracing::examples::basic as application;
 use ecosystem::tracing;
 use std::testing;
 use std::json;

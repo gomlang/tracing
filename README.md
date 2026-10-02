@@ -50,7 +50,7 @@ fn main() -> () {
 }
 ```
 
-The independent `consumer` module is a versioned consumer that simulates request handlers with concurrently traced lookup tasks. It exercises exported contexts, callbacks, immutable fields, generic scoped results, hidden spans, and parent closure before child completion. `--json` reads an array of scenarios from stdin and emits records plus metrics for each scenario.
+The `examples/basic/` example simulates request handlers with concurrently traced lookup tasks. It exercises exported contexts, callbacks, immutable fields, generic scoped results, hidden spans, and parent closure before child completion. `--json` reads an array of scenarios from stdin and emits records plus metrics for each scenario.
 
 ## Structured logging and handler contracts
 
@@ -96,8 +96,20 @@ From the repository root:
 (cd ../verification && just ecosystem-test tracing)
 ```
 
-This checks formatting, black-box tests, the standalone registry consumer, cached builds, a native consumer test replaying a deterministic independent event/ancestry/field oracle, and every library test under the Go race detector. Tests coordinate blocked sinks with channels and cover saturation, cancellation, deadlines, retryable barriers/closure, filter reload, independent sampling ordinals, alias isolation, concurrent task propagation, concurrent span/tracer closure, and sink failures.
+This checks formatting, black-box tests, the example and its downstream checks, cached builds, a native example test replaying a deterministic independent event/ancestry/field oracle, and every library test under the Go race detector. Tests coordinate blocked sinks with channels and cover saturation, cancellation, deadlines, retryable barriers/closure, filter reload, independent sampling ordinals, alias isolation, concurrent task propagation, concurrent span/tracer closure, and sink failures.
 
-The committed reference fixture records 92 scenarios generated independently for root/child visibility and sampling decisions. A GoML `#[test]` compares event multisets and verifies sequence numbers, start/end pairing, visible ancestry, elapsed-time constraints, typed fields and metrics. The test has no Python runtime dependency. See [fixture provenance](consumer/tests/data/README.md). It does not claim binary or API compatibility with Rust tracing or OpenTelemetry.
+The committed reference fixture records 92 scenarios generated independently for root/child visibility and sampling decisions. A GoML `#[test]` compares event multisets and verifies sequence numbers, start/end pairing, visible ancestry, elapsed-time constraints, typed fields and metrics. The test has no Python runtime dependency. See [fixture provenance](examples/basic/tests/data/README.md). It does not claim binary or API compatibility with Rust tracing or OpenTelemetry.
 
 Future work includes W3C trace propagation, OpenTelemetry exporters, richer sampling policies, subscriber lifecycle aggregation, byte-budget admission, and optional instrumentation syntax once supported by the language.
+
+## Development and examples
+
+Requires GoML 0.1.55 or newer. The `examples/basic/` example shares the root manifest; test-only helpers are declared in `[dev-dependencies]`. From the library root, run:
+
+```sh
+goml run --example basic
+goml test
+goml verify --timeout 300s
+```
+
+`goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test tracing)` also retains the library-specific smoke and compatibility checks.

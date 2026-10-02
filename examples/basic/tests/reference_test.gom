@@ -1,6 +1,6 @@
 package tests;
 
-use consumer::tracing as app;
+use ecosystem::tracing::examples::basic as app;
 use ecosystem::verification::reference;
 use std::collections::{HashSet};
 use std::json;

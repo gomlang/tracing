@@ -1,6 +1,0 @@
-[module]
-path = "consumer::tracing"
-
-[dependencies]
-"ecosystem::tracing" = "0.1.0"
-"ecosystem::verification" = "0.1.0"
