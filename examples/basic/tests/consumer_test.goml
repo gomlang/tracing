@@ -92,3 +92,30 @@ fn consumer_bounded_memory_sink_releases_collected_records() -> () {
     testing::assert_eq(memory.drain().len(), 1);
     testing::assert(memory.records().is_empty());
 }
+
+#[test]
+fn consumer_selects_bounded_publication_without_changing_options() -> () {
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new_with_limits(
+                    scope,
+                    tracing::MemorySink::new().sink(),
+                    tracing::Options::standard(),
+                    tracing::RecordLimits::standard(),
+                ),
+                "bounded tracer",
+            );
+            let ctx = context::Context::background();
+            testing::assert_ok(
+                tracer.event(
+                    ctx,
+                    Option::None,
+                    tracing::Metadata::new(tracing::Level::Info, "consumer", "limited"),
+                    tracing::Fields::new(),
+                ),
+            );
+            testing::assert_ok(tracer.close(ctx));
+        },
+    );
+}

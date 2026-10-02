@@ -1,0 +1,216 @@
+package tests;
+
+use ecosystem::tracing;
+use std::context;
+use std::task;
+use std::testing;
+
+#[test]
+fn payload_limits_check_utf8_metadata_and_all_merged_fields() -> () {
+    task::scope(
+        |scope| {
+            let memory = tracing::MemorySink::new();
+            let limits = tracing::RecordLimits { max_fields: 2, max_text_bytes: 8 };
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new_with_limits(
+                    scope,
+                    memory.sink(),
+                    tracing::Options::standard(),
+                    limits,
+                ),
+                "tracer",
+            );
+            let ctx = context::Context::background();
+            let meta = tracing::Metadata::new(tracing::Level::Info, "t", "n");
+            let fields = tracing::Fields::new().with("k", tracing::Value::Text("😀"));
+            testing::assert_ok(tracer.event(ctx, Option::None, meta, fields));
+            let oversized = fields.with("x", tracing::Value::Text("y"));
+            testing::assert_eq(
+                testing::expect_err(tracer.event(ctx, Option::None, meta, oversized), "bytes").kind,
+                tracing::ErrorKind::InvalidInput,
+            );
+            let exact = fields.with("x", tracing::Value::Bool(true));
+            testing::assert_ok(tracer.event(ctx, Option::None, meta, exact));
+            let too_many = tracing::Fields::new().with("a", tracing::Value::Null).with(
+                "b",
+                tracing::Value::Null,
+            ).with("c", tracing::Value::Null);
+            testing::assert(tracer.event(ctx, Option::None, meta, too_many).is_err());
+            let span = testing::expect_ok(tracer.span(ctx, Option::None, meta, fields), "span");
+            testing::assert(
+                span.record(ctx, tracing::Fields::new().with("x", tracing::Value::Text("y"))).is_err(),
+            );
+            testing::assert_ok(span.close(ctx));
+            testing::assert_eq(
+                testing::expect_ok(tracer.metrics(ctx), "metrics").accepted,
+                4.to_u64(),
+            );
+            testing::assert_eq(
+                testing::expect_ok(tracer.metrics(ctx), "metrics").dropped,
+                0.to_u64(),
+            );
+            testing::assert_ok(tracer.close(ctx));
+            let records = memory.records();
+            testing::assert_eq(records.len(), 4);
+            for at in 0..4 {
+                testing::assert_eq(records[at].sequence, (at + 1).to_u64());
+            }
+            testing::assert(records[3].fields.get("x").is_none());
+        },
+    );
+}
+
+#[test]
+fn filtered_events_skip_limits_but_retained_hidden_spans_do_not() -> () {
+    task::scope(
+        |scope| {
+            let options = tracing::Options {
+                filter: tracing::Filter::new(Option::None),
+                ..tracing::Options::standard(),
+            };
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new_with_limits(
+                    scope,
+                    tracing::MemorySink::new().sink(),
+                    options,
+                    tracing::RecordLimits { max_fields: 0, max_text_bytes: 0 },
+                ),
+                "tracer",
+            );
+            let ctx = context::Context::background();
+            let meta = tracing::Metadata::new(tracing::Level::Info, "oversized", "");
+            testing::assert_eq(
+                testing::expect_ok(
+                    tracer.event(ctx, Option::None, meta, tracing::Fields::new()),
+                    "filtered",
+                ),
+                tracing::Delivery::Filtered,
+            );
+            testing::assert(tracer.span(ctx, Option::None, meta, tracing::Fields::new()).is_err());
+            let empty = tracing::Metadata::new(tracing::Level::Info, "", "");
+            let span = testing::expect_ok(
+                tracer.span(ctx, Option::None, empty, tracing::Fields::new()),
+                "hidden span",
+            );
+            testing::assert(
+                span.record(ctx, tracing::Fields::new().with("", tracing::Value::Null)).is_err(),
+            );
+            testing::assert_ok(span.close(ctx));
+            testing::assert_ok(tracer.close(ctx));
+            testing::assert(
+                tracing::Tracer::new_with_limits(
+                    scope,
+                    tracing::MemorySink::new().sink(),
+                    options,
+                    tracing::RecordLimits { max_fields: -1, max_text_bytes: 0 },
+                ).is_err(),
+            );
+        },
+    );
+}
+
+#[test]
+fn logger_attributes_and_event_fields_share_one_payload_budget() -> () {
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new_with_limits(
+                    scope,
+                    tracing::MemorySink::new().sink(),
+                    tracing::Options::standard(),
+                    tracing::RecordLimits { max_fields: 1, max_text_bytes: 64 },
+                ),
+                "tracer",
+            );
+            let ctx = context::Context::background();
+            let fields = tracing::Fields::new().with("one", tracing::Value::Int(1));
+            let span = testing::expect_ok(
+                tracer.span(
+                    ctx,
+                    Option::None,
+                    tracing::Metadata::new(tracing::Level::Info, "t", "s"),
+                    fields,
+                ),
+                "span",
+            );
+            testing::assert_ok(
+                span.event(
+                    ctx,
+                    tracing::Metadata::new(tracing::Level::Info, "t", "event"),
+                    tracing::Fields::new().with("two", tracing::Value::Int(2)),
+                ),
+            );
+            testing::assert_ok(span.close(ctx));
+            let logger = testing::expect_ok(tracing::Logger::standard(tracer, "t"), "logger");
+            let logger = testing::expect_ok(logger.with_attrs(fields), "attrs");
+            testing::assert(
+                logger.log(
+                    ctx,
+                    tracing::Level::Info,
+                    "event",
+                    tracing::Fields::new().with("two", tracing::Value::Int(2)),
+                ).is_err(),
+            );
+            testing::assert_ok(
+                logger.log(
+                    ctx,
+                    tracing::Level::Info,
+                    "event",
+                    tracing::Fields::new().with("one", tracing::Value::Int(2)),
+                ),
+            );
+            testing::assert_ok(tracer.close(ctx));
+        },
+    );
+}
+
+#[test]
+fn concurrent_publishers_share_payload_policy_without_latching_rejections() -> () {
+    let memory = tracing::MemorySink::new();
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new_with_limits(
+                    scope,
+                    memory.sink(),
+                    tracing::Options::standard(),
+                    tracing::RecordLimits { max_fields: 1, max_text_bytes: 4 },
+                ),
+                "tracer",
+            );
+            let tasks = Vec::new();
+            for _ in 0..3 {
+                tasks.push(
+                    scope.spawn(
+                        |_| {
+                            for _ in 0..50 {
+                                let meta = tracing::Metadata::new(tracing::Level::Info, "t", "e");
+                                testing::assert_ok(
+                                    tracer.event(
+                                        context::Context::background(),
+                                        Option::None,
+                                        meta,
+                                        tracing::Fields::new().with("k", tracing::Value::Text("v")),
+                                    ),
+                                );
+                                testing::assert(
+                                    tracer.event(
+                                        context::Context::background(),
+                                        Option::None,
+                                        meta,
+                                        tracing::Fields::new().with("k", tracing::Value::Text("vv")),
+                                    ).is_err(),
+                                );
+                            }
+                        },
+                    ),
+                );
+            }
+            for job in tasks {
+                job.join();
+            }
+            testing::assert_ok(tracer.close(context::Context::background()));
+        },
+    );
+    testing::assert_eq(memory.records().len(), 150);
+}
