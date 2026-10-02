@@ -67,3 +67,28 @@ fn consumer_suppression_and_empty_request_cases() -> () {
         testing::assert(records.is_empty());
     }
 }
+
+#[test]
+fn consumer_bounded_memory_sink_releases_collected_records() -> () {
+    let memory = testing::expect_ok(tracing::MemorySink::bounded(4), "memory");
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(scope, memory.sink(), tracing::Options::standard()),
+                "tracer",
+            );
+            let ctx = context::Context::background();
+            testing::assert_ok(
+                tracer.event(
+                    ctx,
+                    Option::None,
+                    tracing::Metadata::new(tracing::Level::Info, "consumer", "event"),
+                    tracing::Fields::new(),
+                ),
+            );
+            testing::assert_ok(tracer.close(ctx));
+        },
+    );
+    testing::assert_eq(memory.drain().len(), 1);
+    testing::assert(memory.records().is_empty());
+}

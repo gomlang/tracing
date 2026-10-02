@@ -1,0 +1,91 @@
+package tests;
+
+use ecosystem::tracing;
+use std::context;
+use std::task;
+use std::testing;
+
+#[test]
+fn bounded_memory_sink_drains_and_latches_overflow() -> () {
+    testing::assert(tracing::MemorySink::bounded(0).is_err());
+    testing::assert(tracing::MemorySink::bounded(1000001).is_err());
+    let memory = testing::expect_ok(tracing::MemorySink::bounded(2), "memory");
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(scope, memory.sink(), tracing::Options::standard()),
+                "tracer",
+            );
+            let ctx = context::Context::background();
+            let metadata = tracing::Metadata::new(tracing::Level::Info, "memory", "event");
+            for _ in 0..2 {
+                testing::assert_ok(
+                    tracer.event(ctx, Option::None, metadata, tracing::Fields::new()),
+                );
+            }
+            testing::assert_ok(tracer.flush(ctx));
+            let drained = memory.drain();
+            testing::assert_eq(drained.len(), 2);
+            testing::assert_eq(memory.records().len(), 0);
+            for _ in 0..2 {
+                testing::assert_ok(
+                    tracer.event(ctx, Option::None, metadata, tracing::Fields::new()),
+                );
+            }
+            testing::assert_ok(tracer.flush(ctx));
+            drained.clear();
+            testing::assert_eq(memory.records().len(), 2);
+            testing::assert_ok(tracer.event(ctx, Option::None, metadata, tracing::Fields::new()));
+            let error = testing::expect_err(tracer.flush(ctx), "overflow");
+            testing::assert_eq(error.kind, tracing::ErrorKind::Sink);
+            testing::assert_eq(memory.drain().len(), 2);
+            testing::assert_eq(
+                testing::expect_err(tracer.close(ctx), "latched").kind,
+                tracing::ErrorKind::Sink,
+            );
+            testing::assert_eq(memory.records().len(), 0);
+        },
+    );
+}
+
+#[test]
+fn concurrent_memory_draining_preserves_each_record_once() -> () {
+    let memory = testing::expect_ok(tracing::MemorySink::bounded(512), "memory");
+    let collected = Vec::new();
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(scope, memory.sink(), tracing::Options::standard()),
+                "tracer",
+            );
+            let worker = scope.spawn(
+                |_| {
+                    for _ in 0..200 {
+                        testing::assert_ok(
+                            tracer.event(
+                                context::Context::background(),
+                                Option::None,
+                                tracing::Metadata::new(tracing::Level::Info, "memory", "event"),
+                                tracing::Fields::new(),
+                            ),
+                        );
+                    }
+                    testing::assert_ok(tracer.close(context::Context::background()));
+                },
+            );
+            for _ in 0..200 {
+                for record in memory.drain() {
+                    collected.push(record);
+                }
+            }
+            worker.join();
+        },
+    );
+    for record in memory.drain() {
+        collected.push(record);
+    }
+    testing::assert_eq(collected.len(), 200);
+    for index in 0..collected.len() {
+        testing::assert_eq(collected[index].sequence, (index + 1).to_u64());
+    }
+}
