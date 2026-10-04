@@ -18,37 +18,74 @@ A structured tracing library implemented in GoML, with no Go adapter. It provide
 ## Example
 
 ```goml
+package main;
+
 use ecosystem::tracing;
 use std::context;
 use std::io;
+use std::panic;
 use std::task;
 
-fn main() -> () {
-    task::scope(|scope| {
-        let ctx = context::Context::background();
-        let sink = tracing::Sink::writer(io::stdout(), tracing::Format::Json);
-        let tracer = tracing::Tracer::new(scope, sink, tracing::Options::standard()).unwrap();
-        let span = tracer.span(
-            ctx,
-            Option::None,
-            tracing::Metadata::new(tracing::Level::Info, "service::http", "request"),
-            tracing::Fields::new().with("path", tracing::Value::Text("/users")),
-        ).unwrap();
-        let parent = span.context();
-        let job = scope.spawn(|_| {
-            tracer.event(
+fn run() -> Result[(), string] {
+    task::scope(
+        |scope| {
+            let ctx = context::Context::background();
+            let sink = tracing::Sink::writer(io::stdout(), tracing::Format::Json);
+            let tracer = tracing::Tracer::new(scope, sink, tracing::Options::standard()).map_err(
+                |error| error.to_string(),
+            )?;
+            tracer.in_scope(
                 ctx,
-                Option::Some(parent),
-                tracing::Metadata::new(tracing::Level::Info, "service::db", "query"),
-                tracing::Fields::new().with("rows", tracing::Value::Uint(3)),
-            ).unwrap()
-        });
-        let _ = job.join();
-        span.close(ctx).unwrap();
-        tracer.close(ctx).unwrap();
-    });
+                |tracer| {
+                    tracer.span(
+                        ctx,
+                        Option::None,
+                        tracing::Metadata::new(tracing::Level::Info, "service::http", "request"),
+                        tracing::Fields::new().with("path", tracing::Value::Text("/users")),
+                    ).map_err(|error| error.to_string()).and_then(
+                        |span| {
+                            span.in_scope(
+                                ctx,
+                                |parent| {
+                                    let job = scope.spawn(
+                                        |_| {
+                                            tracer.event(
+                                                ctx,
+                                                Option::Some(parent),
+                                                tracing::Metadata::new(
+                                                    tracing::Level::Info,
+                                                    "service::db",
+                                                    "query",
+                                                ),
+                                                tracing::Fields::new().with(
+                                                    "rows",
+                                                    tracing::Value::Uint(3),
+                                                ),
+                                            )
+                                        },
+                                    );
+                                    job.join().map(|_| ())
+                                },
+                            ).map_err(|error| error.to_string())
+                        },
+                    )
+                },
+            ).map_err(|error| error.to_string())
+        },
+    )
+}
+
+fn main() -> () {
+    if let Err(error) = run() {
+        panic::raise(error);
+    }
 }
 ```
+
+The task's event result is propagated to the caller. Scoped cleanup attempts to
+close the span and tracer on both success and failure, preserving action and
+cleanup errors. On success, the program emits a span start, a query event and a
+span end as JSON records.
 
 The `examples/basic/` example simulates request handlers with concurrently traced lookup tasks. It exercises exported contexts, callbacks, immutable fields, generic scoped results, hidden spans, and parent closure before child completion. `--json` reads an array of scenarios from stdin and emits records plus metrics for each scenario.
 
