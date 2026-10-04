@@ -301,9 +301,13 @@ impl Tracer {
 
 fn worker(tracer: Tracer, sink: Sink, token: task::CancelToken) -> () {
     loop {
-        let command = select {
-            recv(token.done()) as _ => Option::None,
-            recv(tracer.queue) as command => command,
+        let command = if token.is_cancelled() {
+            Option::None
+        } else {
+            select {
+                recv(token.done()) as _ => Option::None,
+                recv(tracer.queue) as command => command,
+            }
         };
         match command {
             Some(Command::Record(record)) => {

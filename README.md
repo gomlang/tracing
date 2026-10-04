@@ -95,6 +95,12 @@ Sink callbacks must return normally. They must not synchronously call admission,
 
 Always close the tracer before leaving its task scope. Cancellation of the owning scope aborts queue processing, latches a cancellation error, and still calls flush/finish; accepted records may then remain unwritten. A callback that blocks forever can prevent the worker/task scope from finishing. Scoped helpers guarantee cleanup only for normal returns and `Result` propagation, matching `std::resource`; panic cleanup is not guaranteed. Give cleanup an uncancelled or separate bounded context when the action's context may already have expired.
 
+After an active sink callback returns, the worker checks scope cancellation
+before taking another queued command. An already cancelled scope therefore
+cannot be masked by a queued close. A write error returned by that active
+callback remains the first failure; later cancellation or cleanup errors do not
+replace it.
+
 ## Validation
 
 From the repository root:

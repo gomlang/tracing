@@ -1,0 +1,119 @@
+package tests;
+
+use ecosystem::tracing;
+use std::task;
+use std::testing;
+
+#[test]
+fn cancelled_worker_does_not_start_queued_records_after_active_write_returns() -> () {
+    for round in 0..32 {
+        let entered: Channel[()] = Channel::new(1);
+        let release: Channel[()] = Channel::new(1);
+        let writes = Ref::new(0);
+        let flushes = Ref::new(0);
+        let finishes = Ref::new(0);
+        task::scope(
+            |scope| {
+                let tracer = testing::expect_ok(
+                    tracing::Tracer::new(
+                        scope,
+                        tracing::Sink::new(
+                            |_| {
+                                writes.set(writes.get() + 1);
+                                if writes.get() == 1 {
+                                    entered.send(());
+                                    let _ = release.recv();
+                                }
+                                Result::Ok(())
+                            },
+                            || {
+                                flushes.set(flushes.get() + 1);
+                                if round % 2 == 0 {
+                                    Result::Ok(())
+                                } else {
+                                    Result::Err(tracing::Error::sink("flush failed"))
+                                }
+                            },
+                            || {
+                                finishes.set(finishes.get() + 1);
+                                if round % 2 == 0 {
+                                    Result::Ok(())
+                                } else {
+                                    Result::Err(tracing::Error::sink("finish failed"))
+                                }
+                            },
+                        ),
+                        tracing::Options { capacity: 4, ..tracing::Options::standard() },
+                    ),
+                    "tracer",
+                );
+                let _ = event(tracer, "active");
+                signal(entered);
+                let _ = event(tracer, "queued 1");
+                let _ = event(tracer, "queued 2");
+                scope.cancel();
+                release.send(());
+                let problem = testing::expect_err(tracer.close(background()), "cancelled owner");
+                testing::assert_eq(problem.kind, tracing::ErrorKind::Cancelled);
+            },
+        );
+        testing::assert_eq(writes.get(), 1);
+        testing::assert_eq(flushes.get(), 1);
+        testing::assert_eq(finishes.get(), 1);
+    }
+}
+
+#[test]
+fn cancelling_during_a_failed_write_keeps_the_sink_failure_and_finishes_once() -> () {
+    let entered: Channel[()] = Channel::new(1);
+    let release: Channel[()] = Channel::new(1);
+    let writes = Ref::new(0);
+    let flushes = Ref::new(0);
+    let finishes = Ref::new(0);
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(
+                    scope,
+                    tracing::Sink::new(
+                        |_| {
+                            writes.set(writes.get() + 1);
+                            entered.send(());
+                            let _ = release.recv();
+                            Result::Err(tracing::Error::sink("write failed"))
+                        },
+                        || {
+                            flushes.set(flushes.get() + 1);
+                            Result::Err(tracing::Error::sink("flush failed"))
+                        },
+                        || {
+                            finishes.set(finishes.get() + 1);
+                            Result::Err(tracing::Error::sink("finish failed"))
+                        },
+                    ),
+                    tracing::Options { capacity: 4, ..tracing::Options::standard() },
+                ),
+                "tracer",
+            );
+            let _ = event(tracer, "active");
+            signal(entered);
+            let _ = event(tracer, "queued");
+            scope.cancel();
+            release.send(());
+            let problem = testing::expect_err(tracer.close(background()), "failed write");
+            testing::assert_eq(problem.kind, tracing::ErrorKind::Sink);
+            testing::assert_eq(problem.message, "write failed");
+            testing::assert_eq(
+                testing::expect_err(tracer.flush(background()), "later flush").message,
+                "write failed",
+            );
+            testing::assert_eq(
+                testing::expect_err(tracer.close(background()), "later close").message,
+                "write failed",
+            );
+        },
+    );
+    testing::assert_eq(writes.get(), 1);
+    testing::assert_eq(flushes.get(), 1);
+    testing::assert_eq(finishes.get(), 1);
+}
