@@ -1,0 +1,97 @@
+package tests;
+
+use ecosystem::tracing::{Fields, Field, Value, LogLimits};
+use std::testing;
+
+#[test]
+fn bulk_fields_keep_first_positions_and_last_values_for_exact_names() -> () {
+    let input = Vec::from_array(
+        [
+            Field { name: "界", value: Value::Null },
+            Field { name: "", value: Value::Bool(true) },
+            Field { name: "a.b", value: Value::Int(1) },
+            Field { name: "a", value: Value::Uint(2) },
+            Field { name: "界", value: Value::Text("last") },
+            Field { name: "", value: Value::Bool(false) },
+        ],
+    );
+    let fields = Fields::from_vec(input);
+    let expected = Vec::from_array(
+        [
+            Field { name: "界", value: Value::Text("last") },
+            Field { name: "", value: Value::Bool(false) },
+            Field { name: "a.b", value: Value::Int(1) },
+            Field { name: "a", value: Value::Uint(2) },
+        ],
+    );
+    testing::assert(fields.to_vec() == expected);
+    testing::assert(Fields::new().merge(fields).to_vec() == expected);
+    testing::assert(fields.merge(Fields::new()).to_vec() == expected);
+    testing::assert(fields.merge(fields).to_vec() == expected);
+    input[0] = Field { name: "changed", value: Value::Null };
+    let snapshot = fields.to_vec();
+    snapshot.clear();
+    testing::assert(fields.to_vec() == expected);
+    testing::assert_eq(Fields::from_vec(Vec::new()).len(), 0);
+}
+
+#[test]
+fn large_bulk_merges_preserve_order_overwrites_and_independent_snapshots() -> () {
+    let count = 2048;
+    let left = Vec::new();
+    let right = Vec::new();
+    for index in 0..count {
+        left.push(Field { name: "字段_" + index.to_string(), value: Value::Text("base") });
+        right.push(
+            Field {
+                name: "字段_" + (count + count / 2 - index - 1).to_string(),
+                value: Value::Text("update"),
+            },
+        );
+    }
+    let original = Fields::from_vec(left);
+    let incoming = Fields::from_vec(right);
+    let merged = original.merge(incoming);
+    let output = merged.to_vec();
+    testing::assert_eq(output.len(), count + count / 2);
+    for index in 0..count {
+        testing::assert_eq(output[index].name, "字段_" + index.to_string());
+        testing::assert_eq(
+            output[index].value,
+            Value::Text(
+                if index < count / 2 {
+                    "base"
+                } else {
+                    "update"
+                },
+            ),
+        );
+    }
+    for index in 0..count / 2 {
+        testing::assert_eq(
+            output[count + index].name,
+            "字段_" + (count + count / 2 - index - 1).to_string(),
+        );
+        testing::assert_eq(output[count + index].value, Value::Text("update"));
+    }
+    let grouped = testing::expect_ok(
+        merged.grouped_checked("request", LogLimits { max_fields: 4096, ..LogLimits::new() }),
+        "grouped",
+    );
+    let grouped_output = grouped.to_vec();
+    for index in 0..output.len() {
+        testing::assert_eq(grouped_output[index].name, "request." + output[index].name);
+        testing::assert_eq(grouped_output[index].value, output[index].value);
+    }
+    testing::assert_eq(original.len(), count);
+    testing::assert(original.to_vec() == left);
+    testing::assert(incoming.to_vec() == right);
+    left.clear();
+    right.clear();
+    output.clear();
+    grouped_output.clear();
+    testing::assert_eq(merged.len(), count + count / 2);
+    testing::assert_eq(grouped.len(), merged.len());
+    testing::assert_eq(original.len(), count);
+    testing::assert_eq(incoming.len(), count);
+}

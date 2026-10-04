@@ -60,6 +60,13 @@ The `examples/basic/` example simulates request handlers with concurrently trace
 
 `LogLimits::new()` caps fields at 128, key bytes at 256, message bytes at 4096, text value bytes at 16384, and group depth at eight. `Logger::new`, `Fields::grouped_checked`, and the checked sink wrappers accept explicit limits. Invalid names, overlong values, too many fields, and excessive group depth return `ErrorKind::InvalidInput`. Sink wrappers validate transformed records when the worker calls them; an error follows the existing first-error latching contract and is reported by `flush` or `close`. Ordinary `Fields::with` and direct `Tracer::event` retain their existing behavior and do not acquire these logging limits.
 
+Bulk `Fields::from_vec` and `merge` use a temporary name index and freeze the
+result once, with expected linear work in the number of input fields. Grouping
+also builds one snapshot. The first occurrence fixes a field's position and the
+last occurrence supplies its value; exact names, including dotted names, remain
+distinct. Individual `with` calls still copy an immutable snapshot, so use
+`from_vec` when building a large field set.
+
 `ecosystem::tracing::testing::check_handler(factory)` runs three typed events through a caller-supplied `Sink -> Sink` wrapper and a probe sink. It verifies ordered event records, a flush barrier, close flush, and exactly one finish call, then returns the captured records for wrapper-specific assertions. A wrapper may intentionally filter records. `check_forwarding` additionally requires all three events and their metadata to be preserved. The contract probes use the public tracer lifecycle and are reusable by downstream handler implementations; they do not send messages or require a host logging adapter.
 
 ## Filtering and ancestry

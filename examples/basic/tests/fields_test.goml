@@ -1,0 +1,59 @@
+package tests;
+
+use ecosystem::tracing;
+use std::context;
+use std::task;
+use std::testing;
+
+#[test]
+fn bulk_log_attributes_keep_their_order_when_grouped_event_fields_override() -> () {
+    let count = 512;
+    let attrs = Vec::new();
+    let values = Vec::new();
+    for index in 0..count {
+        attrs.push(
+            tracing::Field { name: "request.key_" + index.to_string(), value: tracing::Value::Null },
+        );
+        values.push(
+            tracing::Field {
+                name: "key_" + (count - index - 1).to_string(),
+                value: tracing::Value::Bool(true),
+            },
+        );
+    }
+    let memory = tracing::MemorySink::new();
+    task::scope(
+        |scope| {
+            let tracer = testing::expect_ok(
+                tracing::Tracer::new(scope, memory.sink(), tracing::Options::standard()),
+                "tracer",
+            );
+            let logger = testing::expect_ok(
+                tracing::Logger::new(
+                    tracer,
+                    "bulk",
+                    tracing::LogLimits { max_fields: count, ..tracing::LogLimits::new() },
+                ),
+                "logger",
+            );
+            let logger = testing::expect_ok(
+                logger.with_attrs(tracing::Fields::from_vec(attrs)),
+                "attrs",
+            );
+            let logger = testing::expect_ok(logger.with_group("request"), "group");
+            let ctx = context::Context::background();
+            testing::assert_ok(
+                logger.log(ctx, tracing::Level::Info, "bulk", tracing::Fields::from_vec(values)),
+            );
+            testing::assert_ok(tracer.close(ctx));
+        },
+    );
+    let records = memory.records();
+    testing::assert_eq(records.len(), 1);
+    let fields = records[0].fields.to_vec();
+    testing::assert_eq(fields.len(), count);
+    for index in 0..count {
+        testing::assert_eq(fields[index].name, "request.key_" + index.to_string());
+        testing::assert_eq(fields[index].value, tracing::Value::Bool(true));
+    }
+}

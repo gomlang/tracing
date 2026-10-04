@@ -68,15 +68,15 @@ impl Fields {
             return Result::Err(log_error("invalid structured group name"))
         }
         check_fields(self, limits)?;
-        let mut result = Fields::new();
-        for field in self.to_vec() {
+        let result = Vec::with_capacity(self.len());
+        for field in self.values.iter() {
             let key = name + "." + field.name;
             if !valid_key(key, limits) {
                 return Result::Err(log_error("structured field name exceeds byte limit"))
             }
-            result = result.with(key, field.value);
+            result.push(Field { name: key, value: field.value });
         }
-        Result::Ok(result)
+        Result::Ok(Fields { values: result.freeze() })
     }
 
     pub fn grouped(self: Fields, name: string) -> Result[Fields, Error] {

@@ -101,17 +101,30 @@ pub struct Fields {
     values: FrozenVec[Field],
 }
 
+fn put_field(values: Vec[Field], positions: HashMap[string, isize], field: Field) -> () {
+    match positions.get(field.name) {
+        Some(index) => {
+            values[index] = field;
+        },
+        None => {
+            positions.insert(field.name, values.len());
+            values.push(field);
+        },
+    }
+}
+
 impl Fields {
     pub fn new() -> Fields {
         Fields { values: Vec::new().freeze() }
     }
 
     pub fn from_vec(values: Vec[Field]) -> Fields {
-        let mut result = Fields::new();
+        let result = Vec::new();
+        let positions = HashMap::new();
         for field in values {
-            result = result.with(field.name, field.value);
+            put_field(result, positions, field);
         }
-        result
+        Fields { values: result.freeze() }
     }
 
     pub fn with(self: Fields, name: string, value: Value) -> Fields {
@@ -127,11 +140,25 @@ impl Fields {
     }
 
     pub fn merge(self: Fields, other: Fields) -> Fields {
-        let mut result = self;
-        for field in other.values.iter() {
-            result = result.with(field.name, field.value);
+        if other.len() == 0 {
+            return self
         }
-        result
+        if self.len() == 0 {
+            return other
+        }
+        if other.len() == 1 {
+            let field = other.values.get(0);
+            return self.with(field.name, field.value)
+        }
+        let result = self.values.to_vec();
+        let positions = HashMap::new();
+        for index in 0..result.len() {
+            positions.insert(result[index].name, index);
+        }
+        for field in other.values.iter() {
+            put_field(result, positions, field);
+        }
+        Fields { values: result.freeze() }
     }
 
     pub fn get(self: Fields, name: string) -> Option[Value] {
