@@ -26,7 +26,13 @@ impl Sink {
 
     pub fn fanout(sinks: Vec[Sink]) -> Sink {
         let sinks = sinks.freeze();
-        Sink::new(
+        let mut group_depth = 0;
+        for sink in sinks.iter() {
+            if sink.group_depth > group_depth {
+                group_depth = sink.group_depth;
+            }
+        }
+        let fanout = Sink::new(
             |record| {
                 let mut error = Option::None;
                 for sink in sinks.iter() {
@@ -69,7 +75,8 @@ impl Sink {
                     None => Result::Ok(()),
                 }
             },
-        )
+        );
+        Sink { group_depth, ..fanout }
     }
 
     pub fn filtered(self: Sink, filter: Filter) -> Sink {

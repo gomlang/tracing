@@ -204,3 +204,29 @@ fn handler_limit_errors_are_reported_at_flush() -> () {
     );
     testing::assert_eq(memory.records().len(), 0);
 }
+
+#[test]
+fn fanout_preserves_the_deepest_sink_group_limit() -> () {
+    let limits = tracing::LogLimits { max_group_depth: 2, ..tracing::LogLimits::new() };
+    let base = tracing::MemorySink::new().sink();
+    let one = testing::expect_ok(base.with_group_checked("one", limits), "one group");
+    let two = testing::expect_ok(one.with_group_checked("two", limits), "two groups");
+    for children in Vec::from_array([Vec::from_array([two, base]), Vec::from_array([base, two])]) {
+        let fanout = tracing::Sink::fanout(children);
+        testing::assert_eq(
+            testing::expect_err(fanout.with_group_checked("extra", limits), "deepest branch").kind,
+            tracing::ErrorKind::InvalidInput,
+        );
+        let nested = tracing::Sink::fanout(Vec::from_array([base, fanout]));
+        testing::assert_err(nested.with_group_checked("extra", limits));
+    }
+    let siblings = tracing::Sink::fanout(Vec::from_array([one, one]));
+    let grouped = testing::expect_ok(
+        siblings.with_group_checked("outer", limits),
+        "sibling depths are not added",
+    );
+    let filtered = grouped.filtered(tracing::Filter::new(Option::Some(tracing::Level::Info)));
+    let attributed = testing::expect_ok(filtered.with_attrs(tracing::Fields::new()), "attributes");
+    testing::assert_err(attributed.with_group_checked("extra", limits));
+    testing::assert_ok(tracing::Sink::fanout(Vec::new()).with_group_checked("empty", limits));
+}
