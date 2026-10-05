@@ -1,0 +1,38 @@
+{
+  "specification": "https://www.w3.org/TR/2021/REC-trace-context-1-20211123/",
+  "level": 1,
+  "primary_sections": {
+    "parent_examples": "3.1,3.2.3",
+    "parent_versions_and_flags": "3.2.2,3.2.4",
+    "state_grammar": "3.3.1.1-3.3.1.4",
+    "state_budget": "3.3.1.5"
+  },
+  "official_test_commit": "acab820be9db7b3433668baa5cdd43f57f4c4be0",
+  "official_parent_fixture_source": "https://github.com/w3c/trace-context/blob/acab820be9db7b3433668baa5cdd43f57f4c4be0/test/test.py",
+  "official_cases_used": [
+    "test_traceparent_version_0xcc",
+    "test_traceparent_version_0x00",
+    "test_traceparent_version_0xff",
+    "test_traceparent_duplicated",
+    "test_traceparent_header_name_valid_casing"
+  ],
+  "expected_source": "Literal W3C 3.1 three-vendor wire values and 3.2.3 IDs/sample bit; independent Python regular-expression truth tables for all 128 ASCII bytes. No production roundtrip supplies expected values.",
+  "ascii_tables": {
+    "key_head_regex": "[a-z]",
+    "key_tail_regex": "[a-z0-9_*/-]",
+    "value_middle_regex": "[\\x20-\\x2b\\x2d-\\x3c\\x3e-\\x7e]",
+    "reproduce": "For each i in range(128), concatenate 1 if re.fullmatch(regex,chr(i)) else 0. Embedded test additionally accounts for OWS or an empty comma member before key and valid k@ey tenant syntax."
+  },
+  "known_reference_differences": [
+    "Official Python Tracestate helper permits special@, special@@vendor, and 1special and considers empty state invalid. These conflict with the Recommendation ABNF/empty-header requirement. We follow the Recommendation, not that helper.",
+    "No claim of running the entire official network conformance suite."
+  ],
+  "documented_library_policies": [
+    "8192-byte traceparent limit before parsing and carrier trimming; Limit error.",
+    "Future opaque suffix only has the required leading dash checked; the entire header additionally must be ASCII HTTP field-value bytes: HTAB or SP..tilde. This is transport policy, not future-field grammar.",
+    "512-byte received/combined tracestate budget counts OWS and added commas; reject rather than truncate. The Recommendation says SHOULD propagate at least512, not a universal512 maximum.",
+    "Empty/OWS members are ignored;32 counts nonempty key/value entries. The2021 ABNF literal segment count is ambiguous with empty-member reception, so this is an explicit interoperability choice.",
+    "Duplicate parent headers invalidate context even when identical. Invalid tracestate is discarded entirely while a valid parent remains.",
+    "Parsing/forwarding preserves parent wire/version/flags; child emits00 and sampled-only flags with a different explicitly supplied parent ID."
+  ]
+}

@@ -1,0 +1,114 @@
+package propagation;
+
+pub struct Extraction {
+    pub context: Option[TraceContext],
+    pub parent_error: Option[Error],
+    pub state_error: Option[Error],
+}
+
+fn header_name(actual: string, expected: string) -> bool {
+    if actual.byte_len() != expected.byte_len() {
+        return false
+    }
+    for index in 0..actual.byte_len() {
+        let byte = actual.byte_get(index);
+        let lower = if byte >= 65 && byte <= 90 {
+            byte + 32
+        } else {
+            byte
+        };
+        if lower != expected.byte_get(index) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn extract(headers: Vec[(string, string)]) -> Extraction {
+    let mut parent: Option[string] = Option::None;
+    for header in headers {
+        if header_name(header.0, "traceparent") {
+            if parent.is_some() {
+                return Extraction {
+                    context: Option::None,
+                    parent_error: Option::Some(
+                        Error {
+                            kind: ErrorKind::DuplicateParent,
+                            message: "multiple traceparent headers",
+                        },
+                    ),
+                    state_error: Option::None,
+                }
+            }
+            parent = Option::Some(header.1);
+        }
+    }
+    let parsed = match parent {
+        None => return Extraction {
+            context: Option::None,
+            parent_error: Option::None,
+            state_error: Option::None,
+        },
+        Some(value) => match if value.byte_len() > MAX_PARENT_BYTES {
+            Result::Err(parent_limit())
+        } else {
+            TraceParent::parse(trim_horizontal(value))
+        } {
+            Ok(value) => value,
+            Err(error) => return Extraction {
+                context: Option::None,
+                parent_error: Option::Some(error),
+                state_error: Option::None,
+            },
+        },
+    };
+    let mut combined = "";
+    let mut found = false;
+    for header in headers {
+        if header_name(header.0, "tracestate") {
+            let separator = if found {
+                1
+            } else {
+                0
+            };
+            if header.1.byte_len() > MAX_STATE_BYTES - combined.byte_len() - separator {
+                return Extraction {
+                    context: Option::Some(TraceContext { parent: parsed, state: TraceState::new() }),
+                    parent_error: Option::None,
+                    state_error: Option::Some(state_limit()),
+                }
+            }
+            if found {
+                combined += ",";
+            }
+            combined += header.1;
+            found = true;
+        }
+    }
+    match TraceState::parse(combined) {
+        Ok(state) => Extraction {
+            context: Option::Some(TraceContext { parent: parsed, state }),
+            parent_error: Option::None,
+            state_error: Option::None,
+        },
+        Err(error) => Extraction {
+            context: Option::Some(TraceContext { parent: parsed, state: TraceState::new() }),
+            parent_error: Option::None,
+            state_error: Option::Some(error),
+        },
+    }
+}
+
+pub fn inject(context: TraceContext, headers: Vec[(string, string)]) -> Vec[(string, string)] {
+    let result: Vec[(string, string)] = Vec::new();
+    for header in headers {
+        if !header_name(header.0, "traceparent") && !header_name(header.0, "tracestate") {
+            result.push(header);
+        }
+    }
+    result.push(("traceparent", context.parent.to_header()));
+    if context.state.len() != 0 {
+        result.push(("tracestate", context.state.to_header()));
+    }
+    result
+}

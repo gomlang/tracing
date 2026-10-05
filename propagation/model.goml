@@ -1,0 +1,97 @@
+package propagation;
+
+pub const MAX_STATE_MEMBERS: isize = 32;
+
+pub const MAX_STATE_BYTES: isize = 512;
+
+pub const MAX_PARENT_BYTES: isize = 8192;
+
+#[derive(Debug, PartialEq)]
+pub enum ErrorKind {
+    InvalidParent,
+    InvalidState,
+    DuplicateParent,
+    DuplicateKey,
+    Limit,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Error {
+    pub kind: ErrorKind,
+    pub message: string,
+}
+
+impl ToString for Error {
+    fn to_string(self: Error) -> string {
+        self.message
+    }
+}
+
+fn invalid_parent(message: string) -> Error {
+    Error { kind: ErrorKind::InvalidParent, message }
+}
+
+fn invalid_state(message: string) -> Error {
+    Error { kind: ErrorKind::InvalidState, message }
+}
+
+fn state_limit() -> Error {
+    Error { kind: ErrorKind::Limit, message: "tracestate exceeds 32 members or 512 bytes" }
+}
+
+fn parent_limit() -> Error {
+    Error { kind: ErrorKind::Limit, message: "traceparent exceeds 8192 bytes" }
+}
+
+fn horizontal(value: byte) -> bool {
+    value == 32 || value == 9
+}
+
+fn trim_horizontal(value: string) -> string {
+    let mut start = 0;
+    let mut end = value.byte_len();
+    while start < end && horizontal(value.byte_get(start)) {
+        start += 1;
+    }
+    while end > start && horizontal(value.byte_get(end - 1)) {
+        end -= 1;
+    }
+    value.byte_slice(start, end)
+}
+
+pub struct TraceContext {
+    pub parent: TraceParent,
+    pub state: TraceState,
+}
+
+impl TraceContext {
+    pub fn new(trace_id: string, parent_id: string, sampled: bool) -> Result[TraceContext, Error] {
+        Result::Ok(
+            TraceContext {
+                parent: TraceParent::new(trace_id, parent_id, sampled)?,
+                state: TraceState::new(),
+            },
+        )
+    }
+
+    pub fn child(self: TraceContext, parent_id: string, sampled: bool) -> Result[
+        TraceContext,
+        Error,
+    ] {
+        Result::Ok(
+            TraceContext { parent: self.parent.child(parent_id, sampled)?, state: self.state },
+        )
+    }
+
+    pub fn child_with_entry(
+        self: TraceContext,
+        parent_id: string,
+        sampled: bool,
+        key: string,
+        value: string,
+    ) -> Result[TraceContext, Error] {
+        let parent = self.parent.child(parent_id, sampled)?;
+        let state = self.state.update(key, value)?;
+        Result::Ok(TraceContext { parent, state })
+    }
+}

@@ -1,0 +1,175 @@
+package propagation;
+
+pub struct TraceState {
+    entries: FrozenVec[(string, string)],
+}
+
+fn lower_letter(value: byte) -> bool {
+    value >= 97 && value <= 122
+}
+
+fn digit(value: byte) -> bool {
+    value >= 48 && value <= 57
+}
+
+fn key_character(value: byte) -> bool {
+    lower_letter(value) || digit(value) || value == 95 || value == 45 || value == 42 || value == 47
+}
+
+fn validate_key(key: string) -> Result[(), Error] {
+    if key.byte_len() == 0 || key.byte_len() > 256 {
+        return Result::Err(invalid_state("tracestate key length must be 1 through 256"))
+    }
+    let mut at = -1;
+    for index in 0..key.byte_len() {
+        let byte = key.byte_get(index);
+        if byte == 64 {
+            if at != -1 {
+                return Result::Err(invalid_state("tracestate key has more than one @"))
+            }
+            at = index;
+        } else if !key_character(byte) {
+            return Result::Err(invalid_state("invalid tracestate key character"))
+        }
+    }
+    if at == -1 {
+        if !lower_letter(key.byte_get(0)) {
+            return Result::Err(
+                invalid_state("simple tracestate key must start with a lowercase letter"),
+            )
+        }
+    } else if at < 1 || at > 241 || key.byte_len() - at - 1 < 1 || key.byte_len() - at - 1 > 14 {
+        return Result::Err(invalid_state("invalid tenant or system ID length"))
+    } else if !(lower_letter(key.byte_get(0)) || digit(key.byte_get(0)))
+        || !lower_letter(key.byte_get(at + 1)) {
+        return Result::Err(invalid_state("invalid tenant or system ID prefix"))
+    }
+    Result::Ok(())
+}
+
+fn validate_value(value: string) -> Result[(), Error] {
+    if value.byte_len() == 0 || value.byte_len() > 256 {
+        return Result::Err(invalid_state("tracestate value length must be 1 through 256"))
+    }
+    for index in 0..value.byte_len() {
+        let byte = value.byte_get(index);
+        if byte < 32 || byte > 126 || byte == 44 || byte == 61 {
+            return Result::Err(invalid_state("invalid tracestate value character"))
+        }
+    }
+    if value.byte_get(value.byte_len() - 1) == 32 {
+        return Result::Err(invalid_state("tracestate value must not end in a space"))
+    }
+    Result::Ok(())
+}
+
+impl TraceState {
+    pub fn new() -> TraceState {
+        TraceState { entries: Vec::new().freeze() }
+    }
+
+    pub fn from_pairs(entries: Vec[(string, string)]) -> Result[TraceState, Error] {
+        if entries.len() > MAX_STATE_MEMBERS {
+            return Result::Err(state_limit())
+        }
+        let copy: Vec[(string, string)] = Vec::new();
+        let mut length = 0;
+        for entry in entries {
+            validate_key(entry.0)?;
+            validate_value(entry.1)?;
+            for previous in copy {
+                if previous.0 == entry.0 {
+                    return Result::Err(
+                        Error { kind: ErrorKind::DuplicateKey, message: "duplicate tracestate key" },
+                    )
+                }
+            }
+            length += entry.0.byte_len() + 1 + entry.1.byte_len()
+                + if copy.is_empty() {
+                    0
+                } else {
+                    1
+                };
+            if length > MAX_STATE_BYTES {
+                return Result::Err(state_limit())
+            }
+            copy.push(entry);
+        }
+        Result::Ok(TraceState { entries: copy.freeze() })
+    }
+
+    pub fn parse(value: string) -> Result[TraceState, Error] {
+        if value.byte_len() > MAX_STATE_BYTES {
+            return Result::Err(state_limit())
+        }
+        let entries: Vec[(string, string)] = Vec::new();
+        let mut start = 0;
+        for end in 0..value.byte_len() + 1 {
+            if end == value.byte_len() || value.byte_get(end) == 44 {
+                let member = trim_horizontal(value.byte_slice(start, end));
+                if member.byte_len() != 0 {
+                    let equals = member.find("=").ok_or(invalid_state("tracestate member needs ="))?;
+                    entries.push(
+                        (
+                            member.byte_slice(0, equals),
+                            member.byte_slice(equals + 1, member.byte_len()),
+                        ),
+                    );
+                    if entries.len() > MAX_STATE_MEMBERS {
+                        return Result::Err(state_limit())
+                    }
+                }
+                start = end + 1;
+            }
+        }
+        TraceState::from_pairs(entries)
+    }
+
+    pub fn len(self: TraceState) -> isize {
+        self.entries.len()
+    }
+
+    pub fn entries(self: TraceState) -> Vec[(string, string)] {
+        self.entries.to_vec()
+    }
+
+    pub fn get(self: TraceState, key: string) -> Option[string] {
+        for entry in self.entries.iter() {
+            if entry.0 == key {
+                return Option::Some(entry.1)
+            }
+        }
+        Option::None
+    }
+
+    pub fn update(self: TraceState, key: string, value: string) -> Result[TraceState, Error] {
+        let entries = Vec::from_array([(key, value)]);
+        for entry in self.entries.iter() {
+            if entry.0 != key {
+                entries.push(entry);
+            }
+        }
+        TraceState::from_pairs(entries)
+    }
+
+    pub fn without(self: TraceState, key: string) -> TraceState {
+        let entries = Vec::new();
+        for entry in self.entries.iter() {
+            if entry.0 != key {
+                entries.push(entry);
+            }
+        }
+        TraceState { entries: entries.freeze() }
+    }
+
+    pub fn to_header(self: TraceState) -> string {
+        let mut result = "";
+        for entry in self.entries.iter() {
+            if result.byte_len() != 0 {
+                result += ",";
+            }
+            result += entry.0 + "=" + entry.1;
+        }
+        result
+    }
+}

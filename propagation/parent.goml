@@ -1,0 +1,136 @@
+package propagation;
+
+#[derive(Debug, PartialEq)]
+pub struct TraceParent {
+    version: u8,
+    trace_id: string,
+    parent_id: string,
+    flags: u8,
+    wire: string,
+}
+
+fn hex_digit(value: byte) -> Option[u8] {
+    if value >= 48 && value <= 57 {
+        Option::Some(value - 48)
+    } else if value >= 97 && value <= 102 {
+        Option::Some(value - 87)
+    } else {
+        Option::None
+    }
+}
+
+fn hex_byte(value: string, index: isize) -> Result[u8, Error] {
+    let first = hex_digit(value.byte_get(index)).ok_or(invalid_parent("expected lowercase hex"))?;
+    let second = hex_digit(value.byte_get(index + 1)).ok_or(
+        invalid_parent("expected lowercase hex"),
+    )?;
+    Result::Ok(first * 16 + second)
+}
+
+fn valid_identifier(value: string, start: isize, end: isize) -> Result[(), Error] {
+    let mut nonzero = false;
+    for index in start..end {
+        let digit = hex_digit(value.byte_get(index)).ok_or(
+            invalid_parent("expected lowercase hex ID"),
+        )?;
+        nonzero = nonzero || digit != 0;
+    }
+    if !nonzero {
+        return Result::Err(invalid_parent("trace and parent IDs must be nonzero"))
+    }
+    Result::Ok(())
+}
+
+impl TraceParent {
+    pub fn parse(value: string) -> Result[TraceParent, Error] {
+        if value.byte_len() > MAX_PARENT_BYTES {
+            return Result::Err(parent_limit())
+        }
+        if value.byte_len() < 55 {
+            return Result::Err(invalid_parent("traceparent is shorter than 55 bytes"))
+        }
+        if value.byte_get(2) != 45 || value.byte_get(35) != 45 || value.byte_get(52) != 45 {
+            return Result::Err(invalid_parent("traceparent has an invalid separator"))
+        }
+        let version = hex_byte(value, 0)?;
+        if version == 255 {
+            return Result::Err(invalid_parent("traceparent version ff is forbidden"))
+        }
+        if version == 0 && value.byte_len() != 55 {
+            return Result::Err(
+                invalid_parent("traceparent version 00 must contain exactly 55 bytes"),
+            )
+        }
+        if value.byte_len() > 55 && value.byte_get(55) != 45 {
+            return Result::Err(invalid_parent("future traceparent fields must follow a dash"))
+        }
+        valid_identifier(value, 3, 35)?;
+        valid_identifier(value, 36, 52)?;
+        let flags = hex_byte(value, 53)?;
+        // Future fields are opaque. Only the HTTP field-value character boundary
+        // is checked, so forwarding cannot introduce a new header line.
+        for index in 55..value.byte_len() {
+            let byte = value.byte_get(index);
+            if byte > 126 || byte < 32 && byte != 9 {
+                return Result::Err(invalid_parent("traceparent must be an ASCII HTTP field value"))
+            }
+        }
+        Result::Ok(
+            TraceParent {
+                version,
+                trace_id: value.byte_slice(3, 35),
+                parent_id: value.byte_slice(36, 52),
+                flags,
+                wire: value,
+            },
+        )
+    }
+
+    pub fn new(trace_id: string, parent_id: string, sampled: bool) -> Result[TraceParent, Error] {
+        if trace_id.byte_len() != 32 || parent_id.byte_len() != 16 {
+            return Result::Err(
+                invalid_parent("trace ID needs 32 hex digits and parent ID needs 16"),
+            )
+        }
+        TraceParent::parse(
+            "00-" + trace_id + "-" + parent_id
+                + if sampled {
+                    "-01"
+                } else {
+                    "-00"
+                },
+        )
+    }
+
+    pub fn version(self: TraceParent) -> u8 {
+        self.version
+    }
+
+    pub fn trace_id(self: TraceParent) -> string {
+        self.trace_id
+    }
+
+    pub fn parent_id(self: TraceParent) -> string {
+        self.parent_id
+    }
+
+    pub fn flags(self: TraceParent) -> u8 {
+        self.flags
+    }
+
+    pub fn sampled(self: TraceParent) -> bool {
+        self.flags & 1 == 1
+    }
+
+    pub fn to_header(self: TraceParent) -> string {
+        self.wire
+    }
+
+    pub fn child(self: TraceParent, parent_id: string, sampled: bool) -> Result[TraceParent, Error] {
+        let child = TraceParent::new(self.trace_id, parent_id, sampled)?;
+        if parent_id == self.parent_id {
+            return Result::Err(invalid_parent("a child must use a new parent ID"))
+        }
+        Result::Ok(child)
+    }
+}

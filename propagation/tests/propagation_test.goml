@@ -1,0 +1,397 @@
+package tests;
+
+use ecosystem::tracing::propagation;
+use ecosystem::tracing::propagation::{TraceParent, TraceState, TraceContext, ErrorKind};
+use std::testing;
+
+const TRACE: string = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+const PARENT: string = "00f067aa0ba902b7";
+
+const CHILD: string = "b9c7c989f97918e1";
+
+const VALID: string = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+fn repeat(value: string, count: isize) -> string {
+    let mut result = "";
+    for _ in 0..count {
+        result += value;
+    }
+    result
+}
+
+#[test]
+fn w3c_recommendation_parent_fields_and_future_version_examples() -> () {
+    // W3C Recommendation 2021, sections 3.1 and 3.2.3; official test.py
+    // test_traceparent_version_0xcc at commit acab820be9db7b3433668baa5cdd43f57f4c4be0.
+    let cases = Vec::from_array(
+        [
+            (VALID, TRACE, PARENT),
+            (
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                "0af7651916cd43dd8448eb211c80319c",
+                "b7ad6b7169203331",
+            ),
+            (
+                "cc-12345678901234567890123456789012-1234567890123456-01-what-the-future-will-be-like",
+                "12345678901234567890123456789012",
+                "1234567890123456",
+            ),
+        ],
+    );
+    for entry in cases {
+        let parent = testing::expect_ok(TraceParent::parse(entry.0), entry.0);
+        testing::assert_eq(parent.trace_id(), entry.1);
+        testing::assert_eq(parent.parent_id(), entry.2);
+        testing::assert(parent.sampled());
+        testing::assert_eq(parent.flags(), 1);
+        testing::assert_eq(parent.to_header(), entry.0);
+    }
+    let unsampled = testing::expect_ok(TraceParent::new(TRACE, PARENT, false), "new root");
+    testing::assert_eq(unsampled.to_header(), "00-" + TRACE + "-" + PARENT + "-00");
+    testing::assert(!unsampled.sampled());
+}
+
+#[test]
+fn parent_rejects_malformed_ids_versions_lengths_and_separators() -> () {
+    let invalid = Vec::from_array(
+        [
+            "",
+            "00",
+            "0-" + TRACE + "-" + PARENT + "-01",
+            "000-" + TRACE + "-" + PARENT + "-01",
+            "ff-" + TRACE + "-" + PARENT + "-01",
+            "FF-" + TRACE + "-" + PARENT + "-01",
+            "0g-" + TRACE + "-" + PARENT + "-01",
+            "00-00000000000000000000000000000000-" + PARENT + "-01",
+            "00-" + TRACE + "-0000000000000000-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e473G-" + PARENT + "-01",
+            "00-" + TRACE + "-00F067aa0ba902b7-01",
+            "00-" + TRACE + "-" + PARENT + "-0A",
+            "00-" + TRACE + "-" + PARENT + "-0",
+            "00-" + TRACE + "-" + PARENT + "-001",
+            "00_" + TRACE + "-" + PARENT + "-01",
+            "00-" + TRACE + "_" + PARENT + "-01",
+            "00-" + TRACE + "-" + PARENT + "_01",
+            VALID + "-",
+            VALID + ".",
+            " " + VALID,
+            VALID + " ",
+            VALID + "," + VALID,
+            "01-" + TRACE + "-" + PARENT + "-01x",
+            "cc-" + TRACE + "-" + PARENT + "-01.what-the-future-will-be-like",
+            "01-" + TRACE + "-" + PARENT + "-01-\r\nforged: value",
+            "01-" + TRACE + "-" + PARENT + "-01-\u0000",
+            "01-" + TRACE + "-" + PARENT + "-01-é",
+        ],
+    );
+    for value in invalid {
+        testing::assert_eq(
+            testing::expect_err(TraceParent::parse(value), value).kind,
+            ErrorKind::InvalidParent,
+        );
+    }
+    testing::assert_err(TraceParent::new(TRACE + "0", PARENT, true));
+    testing::assert_err(TraceParent::new(TRACE, "0000000000000000", true));
+}
+
+#[test]
+fn all_flag_bits_versions_and_child_downgrade_are_explicit() -> () {
+    let digits = "0123456789abcdef";
+    let mut expected: u8 = 0;
+    for first in 0..16 {
+        for second in 0..16 {
+            let hex = digits.byte_slice(first, first + 1) + digits.byte_slice(second, second + 1);
+            let parent = testing::expect_ok(
+                TraceParent::parse("00-" + TRACE + "-" + PARENT + "-" + hex),
+                "all flags",
+            );
+            testing::assert_eq(parent.flags(), expected);
+            testing::assert_eq(parent.sampled(), second % 2 == 1);
+            let versioned = TraceParent::parse(hex + "-" + TRACE + "-" + PARENT + "-01");
+            if expected == 255 {
+                testing::assert_err(versioned);
+            } else {
+                testing::assert_eq(
+                    testing::expect_ok(versioned, "all versions").version(),
+                    expected,
+                );
+                expected += 1;
+            }
+        }
+    }
+    for suffix in Vec::from_array(["", "-", "--", "-UPPER=opaque,spaces allowed\tend"]) {
+        let wire = "cc-" + TRACE + "-" + PARENT + "-ff" + suffix;
+        let incoming = testing::expect_ok(TraceParent::parse(wire), "opaque future fields");
+        testing::assert_eq(incoming.to_header(), wire);
+        let child = testing::expect_ok(incoming.child(CHILD, false), "child version downgrade");
+        testing::assert_eq(child.to_header(), "00-" + TRACE + "-" + CHILD + "-00");
+        testing::assert_eq(child.version(), 0);
+        testing::assert_eq(child.flags(), 0);
+        testing::assert_err(incoming.child(PARENT, false));
+        testing::assert_err(incoming.child(PARENT, true));
+    }
+}
+
+#[test]
+fn state_handles_order_ows_empty_members_and_w3c_vendor_hops() -> () {
+    let state = testing::expect_ok(
+        TraceState::parse(" \t, rojo=00f067aa0ba902b7, \t congo=t61rcWkgMzE , ,"),
+        "W3C state with OWS",
+    );
+    testing::assert_eq(state.to_header(), "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE");
+    let updated = testing::expect_ok(state.update("congo", "ucfJifl5GOE"), "reenter Congo");
+    testing::assert_eq(testing::expect_some(updated.get("congo"), "state lookup"), "ucfJifl5GOE");
+    testing::assert_none(updated.get("missing"));
+    testing::assert_eq(updated.to_header(), "congo=ucfJifl5GOE,rojo=00f067aa0ba902b7");
+    testing::assert_eq(state.to_header(), "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE");
+    testing::assert_eq(updated.without("congo").to_header(), "rojo=00f067aa0ba902b7");
+    testing::assert_eq(updated.without("missing").to_header(), updated.to_header());
+    testing::assert_eq(updated.without("congo").without("rojo").len(), 0);
+    for empty in Vec::from_array(["", " \t ", ",", ", ,\t,"]) {
+        testing::assert_eq(testing::expect_ok(TraceState::parse(empty), "empty state").len(), 0);
+    }
+    testing::assert_eq(
+        testing::expect_ok(TraceState::parse("a= leading space  \t"), "value and OWS").to_header(),
+        "a= leading space",
+    );
+    testing::assert_eq(
+        testing::expect_ok(TraceState::parse("1tenant@system=UPPER / * : !~"), "tenant key").len(),
+        1,
+    );
+}
+
+#[test]
+fn state_strict_abnf_rejects_bad_keys_values_and_duplicates() -> () {
+    // The 2021 ABNF is authoritative: the official Python helper accepts
+    // special@, special@@vendor and 1special, contrary to that grammar.
+    for value in Vec::from_array(
+        [
+            "a",
+            "=v",
+            "1simple=v",
+            "A=v",
+            "a.b=v",
+            "a@=v",
+            "@a=v",
+            "a@@b=v",
+            "a@1b=v",
+            "_tenant@system=v",
+            "a@b@c=v",
+            "a =v",
+            "a\t=v",
+            "a=",
+            "a=   ",
+            "a=v=v",
+            "a=\tvalue",
+            "a=va\tlue",
+            "a=é",
+            "a=\n",
+            "a=\rvalue",
+            "a=\u007f",
+        ],
+    ) {
+        testing::assert_eq(
+            testing::expect_err(TraceState::parse(value), value).kind,
+            ErrorKind::InvalidState,
+        );
+    }
+    testing::assert_eq(
+        testing::expect_err(TraceState::parse("a=first,b=second,a=third"), "duplicate").kind,
+        ErrorKind::DuplicateKey,
+    );
+    testing::assert_err(TraceState::from_pairs(Vec::from_array([("a", "trailing ")])));
+    testing::assert_err(TraceState::from_pairs(Vec::from_array([("a", "comma,value")])));
+    testing::assert_ok(TraceState::parse(repeat("a", 256) + "=v"));
+    testing::assert_err(TraceState::parse(repeat("a", 257) + "=v"));
+    testing::assert_ok(TraceState::parse(repeat("1", 241) + "@" + repeat("a", 14) + "=v"));
+    testing::assert_err(TraceState::parse(repeat("1", 242) + "@a=v"));
+    testing::assert_err(TraceState::parse("1@" + repeat("a", 15) + "=v"));
+    testing::assert_ok(TraceState::parse("a=" + repeat("x", 256)));
+    testing::assert_err(TraceState::parse("a=" + repeat("x", 257)));
+}
+
+#[test]
+fn state_limits_include_separators_and_ows_without_partial_updates() -> () {
+    let entries: Vec[(string, string)] = Vec::new();
+    for index in 0..32 {
+        entries.push(("k" + index.to_string(), "v"));
+    }
+    let full = testing::expect_ok(TraceState::from_pairs(entries), "32 entries");
+    testing::assert_eq(full.len(), 32);
+    testing::assert_ok(TraceState::parse(full.to_header()));
+    testing::assert_eq(
+        testing::expect_ok(
+            TraceState::parse(repeat(",", 100) + "a=v"),
+            "empty members do not consume entry slots",
+        ).len(),
+        1,
+    );
+    testing::assert_eq(
+        testing::expect_err(full.update("new", "v"), "33 entries").kind,
+        ErrorKind::Limit,
+    );
+    testing::assert(
+        testing::expect_ok(full.update("k31", "updated"), "replace at capacity").entries().get(0)
+            == ("k31", "updated"),
+    );
+    testing::assert(full.entries().get(0) == ("k0", "v"));
+    entries.push(("k32", "v"));
+    testing::assert_eq(
+        testing::expect_err(TraceState::from_pairs(entries), "33 input entries").kind,
+        ErrorKind::Limit,
+    );
+    testing::assert_err(TraceState::parse(full.to_header() + ",k32=v"));
+    let exact = "a=" + repeat("x", 251) + ",b=" + repeat("x", 256);
+    testing::assert_eq(exact.byte_len(), 512);
+    let max = testing::expect_ok(TraceState::parse(exact), "512 bytes");
+    testing::assert_eq(
+        testing::expect_err(TraceState::parse(exact + " "), "513 with OWS").kind,
+        ErrorKind::Limit,
+    );
+    testing::assert_eq(
+        testing::expect_err(max.update("a", repeat("x", 252)), "513 update").kind,
+        ErrorKind::Limit,
+    );
+    testing::assert_eq(max.to_header(), exact);
+}
+
+#[test]
+fn state_inputs_outputs_and_updated_contexts_are_immutable_snapshots() -> () {
+    let input = Vec::from_array([("a", "one"), ("b", "two")]);
+    let state = testing::expect_ok(TraceState::from_pairs(input), "snapshot");
+    input[0] = ("a", "changed");
+    input.clear();
+    let output = state.entries();
+    output[0] = ("a", "again");
+    output.clear();
+    testing::assert_eq(state.to_header(), "a=one,b=two");
+    let parent = testing::expect_ok(TraceParent::parse(VALID), "parent");
+    let context = TraceContext { parent, state };
+    let plain_child = testing::expect_ok(context.child(CHILD, false), "child retains state");
+    testing::assert_eq(plain_child.state.to_header(), "a=one,b=two");
+    let child = testing::expect_ok(
+        context.child_with_entry(CHILD, false, "b", "three"),
+        "child update",
+    );
+    testing::assert_eq(context.parent.to_header(), VALID);
+    testing::assert_eq(context.state.to_header(), "a=one,b=two");
+    testing::assert_eq(child.state.to_header(), "b=three,a=one");
+    testing::assert_err(context.child_with_entry(CHILD, false, "BAD", "v"));
+    testing::assert_eq(context.state.to_header(), "a=one,b=two");
+}
+
+#[test]
+fn extract_orders_headers_and_retains_parent_when_state_is_invalid() -> () {
+    let headers = Vec::from_array(
+        [
+            ("TraceParent", " \t" + VALID + "\t "),
+            ("TraceState", "a=1"),
+            ("TRACESTATE", ""),
+            ("tracestate", " b=2 "),
+        ],
+    );
+    let extracted = propagation::extract(headers);
+    testing::assert_none(extracted.parent_error);
+    testing::assert_none(extracted.state_error);
+    let context = testing::expect_some(extracted.context, "context");
+    testing::assert_eq(context.parent.to_header(), VALID);
+    testing::assert_eq(context.state.to_header(), "a=1,b=2");
+    headers.clear();
+    testing::assert_eq(context.state.to_header(), "a=1,b=2");
+    let duplicate_state = propagation::extract(
+        Vec::from_array([("traceparent", VALID), ("tracestate", "a=1"), ("TraceState", "a=2")]),
+    );
+    testing::assert_eq(
+        testing::expect_some(duplicate_state.state_error, "state error").kind,
+        ErrorKind::DuplicateKey,
+    );
+    testing::assert_none(duplicate_state.parent_error);
+    testing::assert_eq(
+        testing::expect_some(duplicate_state.context, "valid parent survives").parent.to_header(),
+        VALID,
+    );
+    testing::assert_eq(
+        testing::expect_some(duplicate_state.context, "state discarded").state.len(),
+        0,
+    );
+    let bad_parent = propagation::extract(
+        Vec::from_array([("traceparent", "bad"), ("tracestate", "also bad")]),
+    );
+    testing::assert_none(bad_parent.context);
+    testing::assert_some(bad_parent.parent_error);
+    testing::assert_none(bad_parent.state_error);
+    let missing = propagation::extract(Vec::from_array([("tracestate", "also bad")]));
+    testing::assert_none(missing.context);
+    testing::assert_none(missing.parent_error);
+    testing::assert_none(missing.state_error);
+    let duplicate_parent = propagation::extract(
+        Vec::from_array([("traceparent", VALID), ("TRACEPARENT", VALID), ("tracestate", "bad")]),
+    );
+    testing::assert_none(duplicate_parent.context);
+    testing::assert_eq(
+        testing::expect_some(duplicate_parent.parent_error, "duplicate parent").kind,
+        ErrorKind::DuplicateParent,
+    );
+    testing::assert_none(duplicate_parent.state_error);
+}
+
+#[test]
+fn combined_header_budget_and_injection_replace_only_propagation_fields() -> () {
+    let headers = Vec::from_array(
+        [
+            ("traceparent", VALID),
+            ("tracestate", "a=" + repeat("x", 251)),
+            ("tracestate", "b=" + repeat("x", 256)),
+        ],
+    );
+    testing::assert_none(propagation::extract(headers).state_error);
+    headers.push(("tracestate", ""));
+    let overflow = propagation::extract(headers);
+    testing::assert_eq(
+        testing::expect_some(overflow.state_error, "combined separator budget").kind,
+        ErrorKind::Limit,
+    );
+    testing::assert_some(overflow.context);
+    let context = testing::expect_ok(TraceContext::new(TRACE, PARENT, true), "outgoing");
+    let input = Vec::from_array(
+        [
+            ("X-Request", "one"),
+            ("TRACEPARENT", "invalid"),
+            ("tracestate", "old=state"),
+            ("TraceParent", "duplicate"),
+            ("x-request", "two"),
+        ],
+    );
+    let output = propagation::inject(context, input);
+    testing::assert(
+        output
+            == Vec::from_array([("X-Request", "one"), ("x-request", "two"), ("traceparent", VALID)]),
+    );
+    output[0] = ("Changed", "value");
+    output.clear();
+    testing::assert_eq(input.len(), 5);
+    testing::assert(input.get(0) == ("X-Request", "one"));
+}
+
+#[test]
+fn future_parent_budget_is_checked_before_scanning_or_carrier_trimming() -> () {
+    let prefix = "01-" + TRACE + "-" + PARENT + "-01-";
+    let exact = prefix + repeat("x", 8192 - prefix.byte_len());
+    testing::assert_eq(exact.byte_len(), propagation::MAX_PARENT_BYTES);
+    testing::assert_ok(TraceParent::parse(exact));
+    testing::assert_eq(
+        testing::expect_err(TraceParent::parse(exact + "x"), "parent limit").kind,
+        ErrorKind::Limit,
+    );
+    let padded = repeat(" ", 8193 - VALID.byte_len()) + VALID;
+    let extracted = propagation::extract(
+        Vec::from_array([("traceparent", padded), ("tracestate", "bad")]),
+    );
+    testing::assert_none(extracted.context);
+    testing::assert_eq(
+        testing::expect_some(extracted.parent_error, "before trim").kind,
+        ErrorKind::Limit,
+    );
+    testing::assert_none(extracted.state_error);
+}

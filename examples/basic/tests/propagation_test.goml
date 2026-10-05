@@ -1,0 +1,55 @@
+package tests;
+
+use ecosystem::tracing::examples::basic as app;
+use ecosystem::tracing::propagation;
+use ecosystem::tracing::propagation::{TraceParent, TraceState, TraceContext, ErrorKind};
+use std::testing;
+
+#[test]
+fn w3c_vendor_hops_cross_public_consumer_boundaries() -> () {
+    // Independent expected wire values: W3C Recommendation 2021 section 3.1.
+    let result = testing::expect_ok(app::propagation_example(), "three service hops");
+    testing::assert(
+        result
+            == Vec::from_array(
+                [
+                    ("x-request", "demo"),
+                    ("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b9c7c989f97918e1-01"),
+                    ("tracestate", "congo=ucfJifl5GOE,rojo=00f067aa0ba902b7"),
+                ],
+            ),
+    );
+    let received = testing::expect_some(propagation::extract(result).context, "receiving service");
+    testing::assert_eq(received.parent.trace_id(), "0af7651916cd43dd8448eb211c80319c");
+    testing::assert_eq(received.parent.parent_id(), "b9c7c989f97918e1");
+    testing::assert(received.parent.sampled());
+}
+
+#[test]
+fn public_propagation_values_expose_diagnostics_and_detach_carriers() -> () {
+    let parent = testing::expect_ok(
+        TraceParent::new("00000000000000000000000000000001", "0000000000000001", false),
+        "small nonzero IDs",
+    );
+    let fields = Vec::from_array([("vendor", "opaque")]);
+    let context = TraceContext {
+        parent,
+        state: testing::expect_ok(TraceState::from_pairs(fields), "state"),
+    };
+    fields.clear();
+    let input = Vec::from_array([("traceparent", "stale"), ("X-Id", "one")]);
+    let headers = propagation::inject(context, input);
+    headers.push(("TraceState", "vendor=duplicate"));
+    let parsed = propagation::extract(headers);
+    testing::assert_eq(
+        testing::expect_some(parsed.state_error, "state diagnostic").kind,
+        ErrorKind::DuplicateKey,
+    );
+    testing::assert_eq(
+        testing::expect_some(parsed.context, "parent retained").parent.trace_id(),
+        "00000000000000000000000000000001",
+    );
+    testing::assert_eq(context.state.to_header(), "vendor=opaque");
+    testing::assert_eq(input.len(), 2);
+    testing::assert_eq(input.get(0).1, "stale");
+}

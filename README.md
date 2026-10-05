@@ -89,6 +89,72 @@ span end as JSON records.
 
 The `examples/basic/` example simulates request handlers with concurrently traced lookup tasks. It exercises exported contexts, callbacks, immutable fields, generic scoped results, hidden spans, and parent closure before child completion. `--json` reads an array of scenarios from stdin and emits records plus metrics for each scenario.
 
+## W3C Trace Context propagation
+
+`ecosystem::tracing::propagation` provides explicit wire values for the
+[W3C Trace Context Level 1 Recommendation (2021)](https://www.w3.org/TR/2021/REC-trace-context-1-20211123/).
+Its `TraceContext { parent: TraceParent, state: TraceState }` is separate from
+the tracer-local `tracing::TraceContext`. It does not attach remote IDs to local
+spans automatically, generate IDs, implement baggage, export OTLP, or provide
+automatic OpenTelemetry integration.
+
+| API | Behavior |
+| --- | --- |
+| `TraceParent::new(trace_id, parent_id, sampled)` | Validate lowercase nonzero 32/16-hex-digit IDs and create version `00` |
+| `TraceParent::parse(value)` | Validate a header value; expose `version`, `trace_id`, `parent_id`, `flags`, and `sampled` getters |
+| `TraceParent.to_header()` | Forward the validated original value, including unknown flags and future opaque fields |
+| `TraceParent.child(parent_id, sampled)` | Require a different nonzero parent ID; emit version `00` with only the sampled flag |
+| `TraceState::new`, `parse`, `from_pairs` | Build a validated immutable ordered state |
+| `TraceState.get`, `entries`, `to_header` | Inspect state; `entries()` returns independent mutable outer storage |
+| `TraceState.update(key, value)`, `without(key)` | Return a new state; updates move the key to the front while retaining other entries' order |
+| `TraceContext::new`, `child`, `child_with_entry` | Create a root or a child wire context; the combined child operation also updates a vendor entry |
+| `extract(headers)` | Return `Extraction { context, parent_error, state_error }` |
+| `inject(context, headers)` | Return a new carrier with current propagation fields |
+
+The carrier is `Vec[(string, string)]`, so HTTP adapters can pass their header
+entries and rebuild their own header collection from the returned pairs.
+Names are matched case-insensitively. Duplicate `traceparent` fields invalidate
+the context even when identical. Version `00` comma-joined values are invalid;
+future suffixes remain opaque and may contain commas. HTTP adapters must retain
+individual parent fields so duplicate detection is not lost through combining.
+Missing or invalid parents cause state to be ignored. Invalid state discards
+the entire state while retaining a valid parent and reporting `state_error`.
+Multiple state fields are combined in their received order with commas.
+Injection preserves other fields and their order, removes all old propagation
+fields, and appends one lowercase parent field and, when nonempty, one state
+field. Inputs, outputs and derived states do not share mutable vector slots.
+
+Version `00` requires exactly 55 bytes. Version `ff` is rejected; future versions
+must retain the valid known prefix and a dash before any additional content.
+Unknown fields are opaque. Sampled is bit zero, not equality with `01`.
+Forwarding preserves received version and flags; creating a child downgrades
+future versions and clears unknown flags. The caller supplies unique IDs and
+chooses the recording decision; changing state for a participating service
+should accompany a new parent, as demonstrated by `child_with_entry`.
+
+The package has explicit resource and transport policies: `MAX_PARENT_BYTES`
+is 8192, checked before parsing and before carrier whitespace trimming. Parent
+values must use ASCII HTTP field-value characters (HTAB or space through `~`),
+including opaque future tails; this is not a grammar for future fields.
+`MAX_STATE_BYTES` is 512, including received whitespace and commas introduced
+by combining fields. This is a library budget, not a universal W3C maximum.
+`MAX_STATE_MEMBERS` is 32 nonempty key/value entries; empty and horizontal-
+whitespace-only members are accepted and ignored. State uses the Recommendation's
+simple/multi-tenant key grammar and printable ASCII value grammar. Duplicate
+keys are rejected. Outer OWS is removed, leading value spaces are retained, and
+canonical output omits empty members and separator OWS. Over-budget parsing or
+updates return `ErrorKind::Limit` without truncation or partial changes.
+
+`goml run --example basic -- --propagation` demonstrates the W3C Congo → Rojo →
+Congo sequence using fixed example IDs and two explicit receiving services.
+The example's public `propagate_service_request` function accepts a carrier,
+extracts a parent, creates a child and injects the outgoing carrier. Existing
+local tracing remains available independently.
+
+Specification sections, independent ASCII truth tables, known differences in
+the official Python reference helper, and the empty-member counting policy are
+recorded in [the fixture provenance](propagation/tests/w3c_sources.json).
+
 ## Structured logging and handler contracts
 
 `Logger::standard(tracer, target)` creates a logging handle over an existing tracer. `with_attrs(fields)` returns a new handle with immutable bound attributes; `with_group(name)` groups later attributes and event fields. `log(ctx, level, message, fields)` emits a tracing event, and `log_in` attaches an existing `TraceContext`. The message is the event's metadata name. `enabled` delegates to the tracer's advisory filter query. Existing sampling, queue admission, flush, and close contracts still apply.
@@ -150,7 +216,7 @@ This checks formatting, black-box tests, the example and its downstream checks, 
 
 The committed reference fixture records 92 scenarios generated independently for root/child visibility and sampling decisions. A GoML `#[test]` compares event multisets and verifies sequence numbers, start/end pairing, visible ancestry, elapsed-time constraints, typed fields and metrics. The test has no Python runtime dependency. See [fixture provenance](examples/basic/tests/data/README.md). It does not claim binary or API compatibility with Rust tracing or OpenTelemetry.
 
-Future work includes W3C trace propagation, OpenTelemetry exporters, richer sampling policies, subscriber lifecycle aggregation, byte-budget admission, and optional instrumentation syntax once supported by the language.
+Future work includes OpenTelemetry exporters, richer sampling policies, subscriber lifecycle aggregation, byte-budget admission, and optional instrumentation syntax once supported by the language.
 
 ## Development and examples
 

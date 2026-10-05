@@ -230,6 +230,14 @@ fn main() -> () {
                 Result::Ok(())
             },
         )
+    } else if args.len() > 1 && args[1] == "--propagation" {
+        propagation_example().map(
+            |headers| {
+                for header in headers {
+                    io::println(header.0 + ": " + header.1);
+                }
+            },
+        )
     } else {
         exercise()
     };

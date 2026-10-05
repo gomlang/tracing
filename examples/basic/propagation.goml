@@ -1,0 +1,39 @@
+package main;
+
+use ecosystem::tracing::propagation;
+
+pub fn propagate_service_request(
+    headers: Vec[(string, string)],
+    operation_id: string,
+    vendor: string,
+    vendor_value: string,
+) -> Result[Vec[(string, string)], string] {
+    let extracted = propagation::extract(headers);
+    if let Some(error) = extracted.parent_error {
+        return Result::Err(error.to_string())
+    }
+    let received = extracted.context.ok_or("request has no incoming traceparent")?;
+    // A malformed tracestate is already discarded; its diagnostic remains in
+    // extracted.state_error for the application's own logging policy.
+    let outgoing = received.child_with_entry(
+        operation_id,
+        received.parent.sampled(),
+        vendor,
+        vendor_value,
+    ).map_err(|error| error.to_string())?;
+    Result::Ok(propagation::inject(outgoing, headers))
+}
+
+pub fn propagation_example() -> Result[Vec[(string, string)], string] {
+    // Fixed IDs reproduce the three vendor hops in W3C Trace Context 3.1.
+    // Production callers must supply their own globally unique trace/span IDs.
+    let first = Vec::from_array(
+        [
+            ("x-request", "demo"),
+            ("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            ("tracestate", "congo=t61rcWkgMzE"),
+        ],
+    );
+    let rojo = propagate_service_request(first, "00f067aa0ba902b7", "rojo", "00f067aa0ba902b7")?;
+    propagate_service_request(rojo, "b9c7c989f97918e1", "congo", "ucfJifl5GOE")
+}
