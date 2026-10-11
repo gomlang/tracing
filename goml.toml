@@ -2,4 +2,4 @@
 path = "ecosystem::tracing"
 
 [dev-dependencies]
-"ecosystem::verification" = true
+"ecosystem::testkit" = true

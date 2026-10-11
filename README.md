@@ -209,7 +209,7 @@ replace it.
 From the repository root:
 
 ```sh
-(cd ../verification && just ecosystem-test tracing)
+(cd ../workflows && just ecosystem-test tracing)
 ```
 
 This checks formatting, black-box tests, the example and its downstream checks, cached builds, a native example test replaying a deterministic independent event/ancestry/field oracle, and every library test under the Go race detector. Tests coordinate blocked sinks with channels and cover saturation, cancellation, deadlines, retryable barriers/closure, filter reload, independent sampling ordinals, alias isolation, concurrent task propagation, concurrent span/tracer closure, and sink failures.
@@ -220,12 +220,12 @@ Future work includes OpenTelemetry exporters, richer sampling policies, subscrib
 
 ## Development and examples
 
-Requires a current GoML toolchain supporting unversioned registry dependencies; see [the pinned ecosystem toolchain](https://github.com/gomlang/verification/blob/main/ci/toolchain.json). The `examples/basic/` example shares the root manifest; test-only helpers are declared in `[dev-dependencies]`. From the library root, run:
+Requires a current GoML toolchain supporting unversioned registry dependencies; see [the pinned ecosystem toolchain](https://github.com/gomlang/workflows/blob/main/ci/toolchain.json). The `examples/basic/` example shares the root manifest; test-only helpers are declared in `[dev-dependencies]`. From the library root, run:
 
 ```sh
 goml run --example basic
 goml test
-(cd ../verification && just ecosystem-test tracing)
+(cd ../workflows && just ecosystem-test tracing)
 ```
 
 `goml test` builds the example and runs its tests. The ecosystem verifier uses an isolated registry snapshot and runs the library-specific smoke and compatibility checks.

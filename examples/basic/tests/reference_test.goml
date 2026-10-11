@@ -1,9 +1,10 @@
 package tests;
 
 use ecosystem::tracing::examples::basic as app;
-use ecosystem::verification::reference;
+use ecosystem::testkit::reference;
 use std::collections::{HashSet};
 use std::json;
+use std::fs;
 use std::testing;
 
 fn reference_number(record: json::Value, key: string) -> isize {
@@ -26,7 +27,7 @@ fn record_signature(record: json::Value) -> json::Value {
 
 #[test]
 fn independent_concurrent_trace_filter_sampling_and_lifecycle_reference() -> () {
-    let fixture = reference::load();
+    let fixture = reference::load(fixture_path("tests/data/reference.json"));
     let scenarios = reference::array(reference::field(fixture, "input"));
     let expected = reference::array(reference::field(fixture, "expected"));
     testing::assert_eq(scenarios.len(), 92);
@@ -85,5 +86,13 @@ fn independent_concurrent_trace_filter_sampling_and_lifecycle_reference() -> () 
             }
         }
         testing::assert_eq(starts.len(), ends.len());
+    }
+}
+
+fn fixture_path(path: string) -> string {
+    if fs::is_dir("examples/basic") {
+        "examples/basic/" + path
+    } else {
+        path
     }
 }
